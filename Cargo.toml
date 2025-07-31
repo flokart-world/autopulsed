@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Shintaro Sakahara <skhrshin@flokart.world>"]
 description = "A daemon for configuring PulseAudio automatically"
-license = "AGPL"
+license = "AGPL-3.0"
 
 [[bin]]
 name = "autopulsed"
