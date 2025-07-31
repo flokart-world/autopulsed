@@ -1,0 +1,20 @@
+[package]
+name = "autopulsed"
+version = "0.1.0"
+edition = "2024"
+authors = ["Shintaro Sakahara <skhrshin@flokart.world>"]
+description = "A daemon for configuring PulseAudio devices automatically"
+license = "AGPL"
+
+[[bin]]
+name = "autopulsed"
+path = "src/main.rs"
+
+[dependencies]
+libpulse-binding = "2.28"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+log = "0.4"
+env_logger = "0.10"
+clap = { version = "4.4", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
