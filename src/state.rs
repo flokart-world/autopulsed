@@ -8,7 +8,7 @@ use libpulse_binding::{
 };
 use log::{debug, error, info};
 
-use crate::config::Config;
+use crate::config::{Config, DeviceConfig};
 
 struct AudioSink {
     name: String,
@@ -20,7 +20,7 @@ struct AudioSource {
     recognized_as: Vec<String>,  // Config names
 }
 
-fn check_device_match(device_config: &crate::config::DeviceConfig, proplist: &libpulse_binding::proplist::Proplist) -> bool {
+fn check_device_match(device_config: &DeviceConfig, proplist: &libpulse_binding::proplist::Proplist) -> bool {
     if let Some(detect) = &device_config.detect {
         for (key, expected_value) in detect {
             if let Some(actual_value) = proplist.get_str(key) {
