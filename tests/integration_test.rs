@@ -37,43 +37,128 @@ impl IsolatedPulseServer {
         std::fs::create_dir_all(&runtime_dir)?;
         std::fs::create_dir_all(&state_dir)?;
 
-        // Create a minimal PulseAudio config
-        let config_path = temp_dir.path().join("pulse.conf");
+        // Create a minimal PulseAudio script (not .conf but .pa format)
+        let config_path = temp_dir.path().join("pulse.pa");
         let socket_str = socket_path.display().to_string();
         std::fs::write(&config_path,
-            format!("daemonize = no
-exit-idle-time = -1
-flat-volumes = no
-default-sample-format = s16le
-default-sample-rate = 44100
-default-sample-channels = 2
+            format!("#!/usr/bin/pulseaudio -nF
+# Minimal PulseAudio configuration for testing
 
-# Only load minimal modules for testing
-load-module module-native-protocol-unix socket={}
+# Load only the necessary modules
+.fail
+load-module module-native-protocol-unix socket={} auth-anonymous=1
 load-module module-null-sink sink_name=test_sink_1 sink_properties=device.description=TestSink1
 load-module module-null-sink sink_name=test_sink_2 sink_properties=device.description=TestSink2
 ", socket_str))?;
 
         // Start isolated PulseAudio instance
-        let process = Command::new("pulseaudio")
+        eprintln!("TEST: Starting PulseAudio with socket at: {}", socket_str);
+        eprintln!("TEST: Config file: {}", config_path.display());
+        let mut process = Command::new("pulseaudio")
             .args(&[
+                "-n", // Don't load default script to avoid conflicts
                 "--daemonize=no",
                 "--use-pid-file=no",
                 "--system=no",
                 "--disallow-exit=yes",
                 "--exit-idle-time=-1",
+                "--disable-shm", // Disable shared memory
                 "--file",
                 config_path.to_str().unwrap(),
             ])
             .env("PULSE_RUNTIME_PATH", &runtime_dir)
             .env("PULSE_STATE_PATH", &state_dir)
             .env("PULSE_CONFIG_PATH", temp_dir.path())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/dev/null") // Disable session D-Bus
+            .env("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/dev/null") // Disable system D-Bus
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()?;
 
-        // Wait for server to start
-        thread::sleep(Duration::from_millis(500));
+        // Check if process started successfully
+        thread::sleep(Duration::from_millis(100));
+        if let Ok(Some(status)) = process.try_wait() {
+            return Err(format!(
+                "PulseAudio process exited immediately with status: {:?}",
+                status
+            )
+            .into());
+        }
+
+        // Wait for server to start by polling with pactl
+        let socket_str_for_check = socket_str.clone();
+        let mut server_ready = false;
+
+        // First, check if the socket file exists
+        eprintln!(
+            "TEST: Checking for socket file at: {}",
+            socket_path.display()
+        );
+
+        for i in 0..20 {
+            // Try for up to 10 seconds
+            // Check if socket file exists every 5 attempts
+            if i % 5 == 0 {
+                if socket_path.exists() {
+                    eprintln!("TEST: Socket file exists at attempt {}", i + 1);
+                } else {
+                    eprintln!(
+                        "TEST: Socket file does not exist yet at attempt {}",
+                        i + 1
+                    );
+                }
+            }
+
+            let output = Command::new("pactl")
+                .args(&["--server", &socket_str_for_check, "info"])
+                .output();
+
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    // Check if we actually got server info (not just empty output)
+                    if stdout.contains("Server String:")
+                        || stdout.contains("Server Name:")
+                    {
+                        eprintln!(
+                            "TEST: PulseAudio server ready after {} attempts",
+                            i + 1
+                        );
+                        server_ready = true;
+                        break;
+                    } else {
+                        eprintln!(
+                            "TEST: pactl returned success but unexpected output: {}",
+                            stdout
+                        );
+                    }
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    eprintln!(
+                        "TEST: pactl check attempt {} failed: {}",
+                        i + 1,
+                        stderr
+                    );
+                }
+            } else {
+                eprintln!(
+                    "TEST: pactl check attempt {} failed to execute",
+                    i + 1
+                );
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+
+        if !server_ready {
+            // Get PulseAudio stderr before failing
+            if let Some(mut stderr) = process.stderr.take() {
+                use std::io::Read;
+                let mut stderr_output = String::new();
+                stderr.read_to_string(&mut stderr_output).ok();
+                eprintln!("TEST: PulseAudio stderr output: {}", stderr_output);
+            }
+            return Err("PulseAudio server failed to become ready".into());
+        }
 
         Ok(Self {
             process: Some(process),
@@ -83,16 +168,35 @@ load-module module-null-sink sink_name=test_sink_2 sink_properties=device.descri
     }
 
     fn socket_path(&self) -> String {
-        format!("unix:{}", self.socket_path.display())
+        let path = format!("unix:{}", self.socket_path.display());
+        eprintln!("TEST: Using socket path: {}", path);
+        path
     }
 }
 
 impl Drop for IsolatedPulseServer {
     fn drop(&mut self) {
         if let Some(mut process) = self.process.take() {
+            eprintln!("TEST: Shutting down PulseAudio process");
             // Try graceful shutdown first
-            process.kill().ok();
-            process.wait().ok();
+            if let Err(e) = process.kill() {
+                eprintln!("TEST: Failed to kill PulseAudio process: {}", e);
+            }
+            // Wait for process to actually exit
+            match process.wait() {
+                Ok(status) => {
+                    eprintln!(
+                        "TEST: PulseAudio process exited with status: {:?}",
+                        status
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "TEST: Failed to wait for PulseAudio process: {}",
+                        e
+                    );
+                }
+            }
         }
     }
 }
@@ -133,16 +237,19 @@ sources:
     std::fs::write(&config_path, config_content)
         .expect("Failed to write test config");
 
-    // Start autopulsed with our test config and PulseAudio server
-    let mut autopulsed = Command::new("cargo")
+    // Use timeout to prevent test hanging on reader.lines()
+    let mut autopulsed = Command::new("timeout")
         .args(&[
+            "2",
+            "cargo",
             "run",
             "--",
             "--config",
             config_path.to_str().unwrap(),
+            "--server",
+            &server.socket_path(),
             "--verbose",
         ])
-        .env("PULSE_SERVER", server.socket_path())
         .env("RUST_LOG", "debug")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -215,8 +322,14 @@ sources:
     }
 
     // Kill autopulsed
-    autopulsed.kill().ok();
-    autopulsed.wait().ok();
+    eprintln!("TEST: Killing autopulsed process");
+    if let Err(e) = autopulsed.kill() {
+        eprintln!("TEST: Failed to kill autopulsed: {}", e);
+    }
+    if let Err(e) = autopulsed.wait() {
+        eprintln!("TEST: Failed to wait for autopulsed: {}", e);
+    }
+    eprintln!("TEST: autopulsed process terminated");
 
     // Verify basic connectivity
     assert!(found_connected, "Should connect to PulseAudio");
@@ -285,10 +398,17 @@ fn test_server_option_overrides_env() {
     let server = IsolatedPulseServer::start()
         .expect("Failed to start isolated PulseAudio server");
 
-    // Start autopulsed with both environment variable and --server option
-    // The --server option should take precedence
-    let mut autopulsed = Command::new("cargo")
-        .args(&["run", "--", "--server", &server.socket_path(), "--verbose"])
+    // Use timeout to prevent test hanging
+    let mut autopulsed = Command::new("timeout")
+        .args(&[
+            "2",
+            "cargo",
+            "run",
+            "--",
+            "--server",
+            &server.socket_path(),
+            "--verbose",
+        ])
         .env("PULSE_SERVER", "/dev/null") // This should be ignored
         .env("RUST_LOG", "debug")
         .stdout(Stdio::piped())
@@ -320,8 +440,14 @@ fn test_server_option_overrides_env() {
     }
 
     // Kill autopulsed
-    autopulsed.kill().ok();
-    autopulsed.wait().ok();
+    eprintln!("TEST: Killing autopulsed process");
+    if let Err(e) = autopulsed.kill() {
+        eprintln!("TEST: Failed to kill autopulsed: {}", e);
+    }
+    if let Err(e) = autopulsed.wait() {
+        eprintln!("TEST: Failed to wait for autopulsed: {}", e);
+    }
+    eprintln!("TEST: autopulsed process terminated");
 
     // Should successfully connect using --server option, not the env var
     assert!(

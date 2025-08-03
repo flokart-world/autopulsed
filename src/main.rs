@@ -83,6 +83,13 @@ impl App {
 
         let state = State::from_context(context, config);
 
+        // Log server connection target if specified
+        if let Some(ref server_str) = server {
+            info!("Connecting to PulseAudio server: {server_str}");
+        } else {
+            info!("Connecting to default PulseAudio server");
+        }
+
         // Connect to PulseAudio server during initialization
         StateRunner::with(&state, |runner| runner.connect(server.as_deref()))?;
 

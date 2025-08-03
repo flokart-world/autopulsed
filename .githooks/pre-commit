@@ -1,0 +1,46 @@
+#!/bin/bash
+# Pre-commit hook to ensure code quality
+# To use: git config core.hooksPath .githooks
+
+echo "🔍 Running pre-commit checks..."
+
+# Check formatting
+echo "Checking Rust formatting..."
+if ! cargo fmt -- --check; then
+    echo "❌ Formatting errors found. Run 'cargo fmt' to fix."
+    exit 1
+fi
+
+# Run clippy
+echo "Running clippy..."
+if ! cargo clippy -- -D warnings 2>/dev/null; then
+    echo "❌ Clippy warnings found. Fix them before committing."
+    exit 1
+fi
+
+# Check for trailing spaces and missing newlines
+echo "Checking file formatting..."
+files_with_issues=0
+
+# Check for missing newlines
+missing_newlines=$(find . -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.yml" -o -name "*.md" \) -exec sh -c 'tail -c1 {} | xxd -p | grep -q 0a || echo {}' \; 2>/dev/null)
+if [ ! -z "$missing_newlines" ]; then
+    echo "❌ Files missing final newline:"
+    echo "$missing_newlines"
+    files_with_issues=1
+fi
+
+# Check for trailing spaces
+trailing_spaces=$(find . -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.yml" \) -exec grep -l " $" {} \; 2>/dev/null)
+if [ ! -z "$trailing_spaces" ]; then
+    echo "❌ Files with trailing spaces:"
+    echo "$trailing_spaces"
+    files_with_issues=1
+fi
+
+if [ $files_with_issues -eq 1 ]; then
+    echo "❌ File formatting issues found. Fix them before committing."
+    exit 1
+fi
+
+echo "✅ All pre-commit checks passed!"

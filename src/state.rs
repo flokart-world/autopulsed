@@ -507,7 +507,13 @@ impl<'scope> StateRunner<'scope> {
                 libpulse_binding::context::FlagSet::NOAUTOSPAWN,
                 None,
             )
-            .map_err(|_| "Failed to connect to PulseAudio")?;
+            .map_err(|e| {
+                format!(
+                    "Failed to connect to PulseAudio server{}: {}",
+                    server.map_or(String::new(), |s| format!(" at '{s}'")),
+                    e
+                )
+            })?;
 
         let weak_origin = Rc::downgrade(&self.origin);
         context.set_state_callback(Some(Box::new(move || {
