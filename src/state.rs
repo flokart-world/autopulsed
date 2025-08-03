@@ -572,3 +572,167 @@ impl<'scope> StateRunner<'scope> {
         proc(&mut runner)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_check_device_match_with_matching_properties() {
+        // Create a mock Proplist
+        let mut proplist =
+            libpulse_binding::proplist::Proplist::new().unwrap();
+        proplist.set_str("device.api", "alsa").unwrap();
+        proplist.set_str("device.bus", "usb").unwrap();
+
+        // Create matching config
+        let mut detect = HashMap::new();
+        detect.insert("device.api".to_string(), "alsa".to_string());
+        detect.insert("device.bus".to_string(), "usb".to_string());
+
+        let config = DeviceConfig {
+            priority: Some(1),
+            detect: Some(detect),
+        };
+
+        assert!(check_device_match(&config, &proplist));
+    }
+
+    #[test]
+    fn test_check_device_match_with_non_matching_properties() {
+        let mut proplist =
+            libpulse_binding::proplist::Proplist::new().unwrap();
+        proplist.set_str("device.api", "alsa").unwrap();
+        proplist.set_str("device.bus", "pci").unwrap();
+
+        let mut detect = HashMap::new();
+        detect.insert("device.api".to_string(), "alsa".to_string());
+        detect.insert("device.bus".to_string(), "usb".to_string()); // Different value
+
+        let config = DeviceConfig {
+            priority: Some(1),
+            detect: Some(detect),
+        };
+
+        assert!(!check_device_match(&config, &proplist));
+    }
+
+    #[test]
+    fn test_check_device_match_with_missing_property() {
+        let mut proplist =
+            libpulse_binding::proplist::Proplist::new().unwrap();
+        proplist.set_str("device.api", "alsa").unwrap();
+        // device.bus is not set
+
+        let mut detect = HashMap::new();
+        detect.insert("device.api".to_string(), "alsa".to_string());
+        detect.insert("device.bus".to_string(), "usb".to_string());
+
+        let config = DeviceConfig {
+            priority: Some(1),
+            detect: Some(detect),
+        };
+
+        assert!(!check_device_match(&config, &proplist));
+    }
+
+    #[test]
+    fn test_check_device_match_with_no_detect() {
+        let proplist = libpulse_binding::proplist::Proplist::new().unwrap();
+
+        let config = DeviceConfig {
+            priority: Some(1),
+            detect: None,
+        };
+
+        assert!(!check_device_match(&config, &proplist));
+    }
+
+    #[test]
+    fn test_find_default_device_with_priorities() {
+        let mut devices = HashMap::new();
+        devices.insert(
+            1,
+            AudioDevice {
+                original_name: "device1".to_string(),
+                recognized_as: vec![
+                    "high_priority".to_string(),
+                    "low_priority".to_string(),
+                ],
+            },
+        );
+        devices.insert(
+            2,
+            AudioDevice {
+                original_name: "device2".to_string(),
+                recognized_as: vec!["medium_priority".to_string()],
+            },
+        );
+
+        let mut configs = HashMap::new();
+        configs.insert(
+            "high_priority".to_string(),
+            DeviceConfig {
+                priority: Some(1),
+                detect: None,
+            },
+        );
+        configs.insert(
+            "medium_priority".to_string(),
+            DeviceConfig {
+                priority: Some(5),
+                detect: None,
+            },
+        );
+        configs.insert(
+            "low_priority".to_string(),
+            DeviceConfig {
+                priority: Some(10),
+                detect: None,
+            },
+        );
+
+        let result = State::find_default_device(&devices, &configs);
+
+        assert!(result.is_some());
+        let (config_name, device_index) = result.unwrap();
+        assert_eq!(config_name, "high_priority");
+        assert_eq!(device_index, 1);
+    }
+
+    #[test]
+    fn test_find_default_device_with_no_priority() {
+        let mut devices = HashMap::new();
+        devices.insert(
+            1,
+            AudioDevice {
+                original_name: "device1".to_string(),
+                recognized_as: vec!["config1".to_string()],
+            },
+        );
+
+        let mut configs = HashMap::new();
+        configs.insert(
+            "config1".to_string(),
+            DeviceConfig {
+                priority: None, // No priority set
+                detect: None,
+            },
+        );
+
+        let result = State::find_default_device(&devices, &configs);
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_default_device_with_empty_devices() {
+        let devices = HashMap::new();
+        let configs = HashMap::new();
+
+        let result = State::find_default_device(&devices, &configs);
+
+        assert!(result.is_none());
+    }
+}
