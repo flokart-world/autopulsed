@@ -79,7 +79,11 @@ trait DeviceType {
     fn select(devices: &AudioDeviceRoot) -> &AudioDeviceGroup;
     fn select_mut(devices: &mut AudioDeviceRoot) -> &mut AudioDeviceGroup;
     fn get_definitions(config: &Config) -> &HashMap<String, DeviceConfig>;
-    fn set_default(context: &mut Context, name: &str, callback: impl FnMut(bool) + 'static);
+    fn set_default(
+        context: &mut Context,
+        name: &str,
+        callback: impl FnMut(bool) + 'static,
+    );
     fn extract_info<'a, 'b>(info: &'a Self::Info<'b>) -> DeviceInfo<'a>;
 }
 
@@ -108,7 +112,11 @@ impl DeviceType for Sink {
         &config.sinks
     }
 
-    fn set_default(context: &mut Context, name: &str, callback: impl FnMut(bool) + 'static) {
+    fn set_default(
+        context: &mut Context,
+        name: &str,
+        callback: impl FnMut(bool) + 'static,
+    ) {
         context.set_default_sink(name, callback);
     }
 
@@ -147,7 +155,11 @@ impl DeviceType for Source {
         &config.sources
     }
 
-    fn set_default(context: &mut Context, name: &str, callback: impl FnMut(bool) + 'static) {
+    fn set_default(
+        context: &mut Context,
+        name: &str,
+        callback: impl FnMut(bool) + 'static,
+    ) {
         context.set_default_source(name, callback);
     }
 
@@ -205,7 +217,10 @@ impl State {
         let configs = T::get_definitions(&self.config);
 
         let mut device = AudioDevice {
-            original_name: device_info.name.map(|s| s.to_string()).unwrap_or_default(),
+            original_name: device_info
+                .name
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
             recognized_as: Vec::new(),
         };
 
@@ -263,8 +278,11 @@ impl State {
             .map(|(index, config_name, _)| (config_name, index))
     }
 
-    fn handle_set_default_result<T>(&mut self, device_index: u32, success: bool)
-    where
+    fn handle_set_default_result<T>(
+        &mut self,
+        device_index: u32,
+        success: bool,
+    ) where
         T: DeviceType,
     {
         let state = T::select_mut(&mut self.all_devices);
@@ -277,13 +295,19 @@ impl State {
             if let Some(callback) = state.pending_default_callback.take() {
                 // Target changed during execution, retry with current target
                 let new_device_index = state.pending_default_index.unwrap();
-                if let Some(new_device) = state.found_devices.get(&new_device_index) {
+                if let Some(new_device) =
+                    state.found_devices.get(&new_device_index)
+                {
                     debug!(
                         "Setting default {} to #{}",
                         T::name_lower_case(),
                         new_device_index
                     );
-                    T::set_default(&mut self.context, &new_device.original_name, callback);
+                    T::set_default(
+                        &mut self.context,
+                        &new_device.original_name,
+                        callback,
+                    );
                 }
             }
         } else {
@@ -292,7 +316,10 @@ impl State {
         }
     }
 
-    pub fn from_context(context: Context, config: Config) -> Rc<RefCell<Self>> {
+    pub fn from_context(
+        context: Context,
+        config: Config,
+    ) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Self::new(context, config)))
     }
 }
@@ -320,9 +347,10 @@ impl<'scope> StateRunner<'scope> {
             let callback = move |success: bool| {
                 if let Some(origin) = weak_origin.upgrade() {
                     StateRunner::with(&origin, |runner| {
-                        runner
-                            .state
-                            .handle_set_default_result::<T>(device_index, success);
+                        runner.state.handle_set_default_result::<T>(
+                            device_index,
+                            success,
+                        );
                     });
                 }
             };
@@ -340,7 +368,8 @@ impl<'scope> StateRunner<'scope> {
                     T::name_lower_case()
                 );
                 scope.pending_default_callback = Some(Box::new(callback));
-            } else if let Some(device) = scope.found_devices.get(&device_index) {
+            } else if let Some(device) = scope.found_devices.get(&device_index)
+            {
                 debug!(
                     "Setting default {} to #{}",
                     T::name_lower_case(),
@@ -364,12 +393,16 @@ impl<'scope> StateRunner<'scope> {
                 match list_result {
                     ListResult::Item(info) => {
                         StateRunner::with(&origin, |runner| {
-                            let match_count = runner.state.add_device::<T>(info);
+                            let match_count =
+                                runner.state.add_device::<T>(info);
                             should_update = should_update || match_count > 0;
                         });
                     }
                     ListResult::End => {
-                        debug!("Finished loading list result for {}s", T::name_lower_case());
+                        debug!(
+                            "Finished loading list result for {}s",
+                            T::name_lower_case()
+                        );
                         if should_update {
                             StateRunner::with(&origin, |runner| {
                                 runner.update_default_device::<T>();
@@ -377,7 +410,10 @@ impl<'scope> StateRunner<'scope> {
                         }
                     }
                     ListResult::Error => {
-                        error!("Error loading list result for {}s", T::name_lower_case());
+                        error!(
+                            "Error loading list result for {}s",
+                            T::name_lower_case()
+                        );
                     }
                 }
             }
@@ -416,9 +452,12 @@ impl<'scope> StateRunner<'scope> {
             .get_source_info_by_index(index, callback);
     }
 
-    fn subscribe_to_events(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let interests = libpulse_binding::context::subscribe::InterestMaskSet::SINK
-            | libpulse_binding::context::subscribe::InterestMaskSet::SOURCE;
+    fn subscribe_to_events(
+        &mut self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let interests =
+            libpulse_binding::context::subscribe::InterestMaskSet::SINK
+                | libpulse_binding::context::subscribe::InterestMaskSet::SOURCE;
 
         let weak_origin = Rc::downgrade(&self.origin);
         let _op = self.state.context.subscribe(interests, move |success| {
@@ -438,7 +477,9 @@ impl<'scope> StateRunner<'scope> {
         Ok(())
     }
 
-    fn on_context_state_changed(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn on_context_state_changed(
+        &mut self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let context_state = self.state.context.get_state();
 
         debug!("The context state is <{context_state:?}> now");
@@ -458,7 +499,11 @@ impl<'scope> StateRunner<'scope> {
         // we call connect() before registering callbacks to prevent race
         // condition.
         context
-            .connect(None, libpulse_binding::context::FlagSet::NOAUTOSPAWN, None)
+            .connect(
+                None,
+                libpulse_binding::context::FlagSet::NOAUTOSPAWN,
+                None,
+            )
             .map_err(|_| "Failed to connect to PulseAudio")?;
 
         let weak_origin = Rc::downgrade(&self.origin);

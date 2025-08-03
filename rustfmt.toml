@@ -21,7 +21,7 @@
 edition = "2024"
 
 # Line width configuration (stable)
-max_width = 100
+max_width = 79  # For proper display in 80-column terminals
 use_small_heuristics = "Default"
 
 # Newline settings (stable)

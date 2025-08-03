@@ -60,8 +60,12 @@ impl App {
 
         let mainloop = Mainloop::new().ok_or("Failed to create mainloop")?;
 
-        let context = Context::new_with_proplist(&mainloop, env!("CARGO_PKG_NAME"), &proplist)
-            .ok_or("Failed to create context")?;
+        let context = Context::new_with_proplist(
+            &mainloop,
+            env!("CARGO_PKG_NAME"),
+            &proplist,
+        )
+        .ok_or("Failed to create context")?;
 
         let state = State::from_context(context, config);
 
@@ -94,7 +98,9 @@ impl App {
     }
 }
 
-fn load_config(config_path: Option<PathBuf>) -> Result<Config, Box<dyn std::error::Error>> {
+fn load_config(
+    config_path: Option<PathBuf>,
+) -> Result<Config, Box<dyn std::error::Error>> {
     if let Some(path) = config_path {
         let content = std::fs::read_to_string(&path)?;
         let config: Config = serde_yaml::from_str(&content)?;
