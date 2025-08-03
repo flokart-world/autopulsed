@@ -39,17 +39,31 @@ struct Args {
     #[arg(short, long, value_name = "FILE")]
     config: Option<PathBuf>,
 
+    #[arg(
+        short,
+        long,
+        value_name = "SERVER",
+        help = "PulseAudio server to connect to"
+    )]
+    server: Option<String>,
+
     #[arg(short, long)]
     verbose: bool,
 }
 
 struct App {
     mainloop: Mainloop,
-    state: Rc<RefCell<State>>,
+    // State must be kept alive for PulseAudio callbacks to work properly.
+    // Even though not directly accessed in run(), dropping it would cause
+    // callbacks to fail since they hold weak references to this state.
+    _state: Rc<RefCell<State>>,
 }
 
 impl App {
-    fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        config: Config,
+        server: Option<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut proplist = Proplist::new().unwrap();
         proplist
             .set_str(
@@ -69,12 +83,16 @@ impl App {
 
         let state = State::from_context(context, config);
 
-        Ok(App { mainloop, state })
+        // Connect to PulseAudio server during initialization
+        StateRunner::with(&state, |runner| runner.connect(server.as_deref()))?;
+
+        Ok(App {
+            mainloop,
+            _state: state,
+        })
     }
 
     fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        StateRunner::with(&self.state, |runner| runner.connect())?;
-
         info!(
             "{} started - monitoring audio device changes",
             env!("CARGO_PKG_NAME")
@@ -130,7 +148,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let config = load_config(args.config)?;
-    let mut app = App::new(config)?;
+    let mut app = App::new(config, args.server)?;
 
     app.run()?;
 

@@ -492,7 +492,10 @@ impl<'scope> StateRunner<'scope> {
         Ok(())
     }
 
-    pub fn connect(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn connect(
+        &mut self,
+        server: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let context = &mut self.state.context;
 
         // Since callbacks will be called within pa_context_connect(),
@@ -500,7 +503,7 @@ impl<'scope> StateRunner<'scope> {
         // condition.
         context
             .connect(
-                None,
+                server,
                 libpulse_binding::context::FlagSet::NOAUTOSPAWN,
                 None,
             )

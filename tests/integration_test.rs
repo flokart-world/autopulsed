@@ -247,3 +247,85 @@ sources:
         "Should set default source to priority 1 device"
     );
 }
+
+#[test]
+fn test_connection_to_nonexistent_server() {
+    use std::process::Stdio;
+
+    // Try to connect to /dev/null as server (guaranteed to fail)
+    let output = Command::new("cargo")
+        .args(&["run", "--", "--server", "/dev/null"])
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("Failed to run autopulsed");
+
+    // Should exit with error
+    assert!(
+        !output.status.success(),
+        "Should fail to connect to /dev/null"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!("STDERR: {}", stderr);
+
+    // Should log connection error
+    assert!(
+        stderr.contains("Failed to connect to PulseAudio"),
+        "Should report connection failure"
+    );
+}
+
+#[test]
+fn test_server_option_overrides_env() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let server = IsolatedPulseServer::start()
+        .expect("Failed to start isolated PulseAudio server");
+
+    // Start autopulsed with both environment variable and --server option
+    // The --server option should take precedence
+    let mut autopulsed = Command::new("cargo")
+        .args(&["run", "--", "--server", &server.socket_path(), "--verbose"])
+        .env("PULSE_SERVER", "/dev/null") // This should be ignored
+        .env("RUST_LOG", "debug")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to start autopulsed");
+
+    // Read stderr for log output
+    let stderr = autopulsed.stderr.take().expect("Failed to get stderr");
+    let reader = BufReader::new(stderr);
+
+    let mut found_connected = false;
+
+    // Read logs for a few seconds
+    let start = std::time::Instant::now();
+    for line in reader.lines() {
+        if start.elapsed() > Duration::from_secs(3) {
+            break;
+        }
+
+        if let Ok(line) = line {
+            println!("LOG: {}", line);
+
+            if line.contains("Connected to PulseAudio server") {
+                found_connected = true;
+                break; // We only need to verify connection
+            }
+        }
+    }
+
+    // Kill autopulsed
+    autopulsed.kill().ok();
+    autopulsed.wait().ok();
+
+    // Should successfully connect using --server option, not the env var
+    assert!(
+        found_connected,
+        "Should connect using --server option, overriding PULSE_SERVER env"
+    );
+}
