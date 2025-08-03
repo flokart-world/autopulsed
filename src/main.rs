@@ -14,9 +14,9 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::cell::RefCell;
 
 use clap::Parser;
 use libpulse_binding::{
@@ -43,7 +43,6 @@ struct Args {
     verbose: bool,
 }
 
-
 struct App {
     mainloop: Mainloop,
     state: Rc<RefCell<State>>,
@@ -52,43 +51,42 @@ struct App {
 impl App {
     fn new(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let mut proplist = Proplist::new().unwrap();
-        proplist.set_str(libpulse_binding::proplist::properties::APPLICATION_NAME, env!("CARGO_PKG_NAME"))
+        proplist
+            .set_str(
+                libpulse_binding::proplist::properties::APPLICATION_NAME,
+                env!("CARGO_PKG_NAME"),
+            )
             .map_err(|_| "Failed to set application name")?;
 
         let mainloop = Mainloop::new().ok_or("Failed to create mainloop")?;
 
-        let context = Context::new_with_proplist(
-            &mainloop,
-            env!("CARGO_PKG_NAME"),
-            &proplist
-        ).ok_or("Failed to create context")?;
+        let context = Context::new_with_proplist(&mainloop, env!("CARGO_PKG_NAME"), &proplist)
+            .ok_or("Failed to create context")?;
 
         let state = State::from_context(context, config);
 
-        Ok(App {
-            mainloop,
-            state,
-        })
+        Ok(App { mainloop, state })
     }
 
     fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        StateRunner::with(&self.state, |runner| {
-            runner.connect()
-        })?;
+        StateRunner::with(&self.state, |runner| runner.connect())?;
 
-        info!("{} started - monitoring audio device changes", env!("CARGO_PKG_NAME"));
+        info!(
+            "{} started - monitoring audio device changes",
+            env!("CARGO_PKG_NAME")
+        );
 
         loop {
             match self.mainloop.iterate(true) {
                 IterateResult::Quit(_) => {
                     info!("Mainloop quit");
                     break;
-                },
+                }
                 IterateResult::Err(_) => {
                     error!("Mainloop error");
                     return Err("Mainloop error".into());
-                },
-                IterateResult::Success(_) => {},
+                }
+                IterateResult::Success(_) => {}
             }
         }
 
@@ -119,7 +117,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .init();
 
-    info!("Starting {} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting {} v{}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
 
     let config = load_config(args.config)?;
     let mut app = App::new(config)?;

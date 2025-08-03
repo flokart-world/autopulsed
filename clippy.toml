@@ -1,0 +1,32 @@
+# autopulsed - A daemon for configuring PulseAudio automatically
+# Copyright (C) 2025  Flokart World, Inc.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# Clippy configuration for autopulsed
+# https://rust-lang.github.io/rust-clippy/master/index.html
+
+# Threshold settings
+too-many-arguments-threshold = 8
+type-complexity-threshold = 250
+cognitive-complexity-threshold = 30
+too-many-lines-threshold = 200
+
+# Allow certain patterns common in this codebase
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+allow-dbg-in-tests = true
+
+# Documentation requirements - not enforced for internal projects
+missing-docs-in-crate-items = false

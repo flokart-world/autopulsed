@@ -14,8 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceConfig {
@@ -23,19 +23,10 @@ pub struct DeviceConfig {
     pub detect: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub sinks: HashMap<String, DeviceConfig>,
     #[serde(default)]
     pub sources: HashMap<String, DeviceConfig>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            sinks: HashMap::new(),
-            sources: HashMap::new(),
-        }
-    }
 }

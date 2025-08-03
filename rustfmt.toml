@@ -1,0 +1,52 @@
+# autopulsed - A daemon for configuring PulseAudio automatically
+# Copyright (C) 2025  Flokart World, Inc.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# Rustfmt configuration for autopulsed
+# https://rust-lang.github.io/rustfmt/
+
+# Use the 2024 edition style
+edition = "2024"
+
+# Line width configuration (stable)
+max_width = 100
+use_small_heuristics = "Default"
+
+# Newline settings (stable)
+newline_style = "Unix"
+
+# Indentation (stable)
+tab_spaces = 4
+hard_tabs = false
+
+# Keep existing formatting for chains (stable)
+chain_width = 60
+
+# Preserve field init shorthand (stable)
+use_field_init_shorthand = true
+
+# Module reordering (stable)
+reorder_modules = true
+
+# Note: Many formatting options are only available in nightly Rust.
+# To use them, you would need to:
+# 1. Install nightly: rustup toolchain install nightly
+# 2. Run: cargo +nightly fmt
+#
+# Unstable options we'd like to use once stable:
+# - group_imports = "StdExternalCrate"  # Group std/external/crate imports
+# - imports_granularity = "Module"       # Merge imports from same module
+# - wrap_comments = true                 # Wrap long comments
+# - format_code_in_doc_comments = true   # Format code in doc comments

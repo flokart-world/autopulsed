@@ -1,0 +1,48 @@
+# autopulsed - A daemon for configuring PulseAudio automatically
+# Copyright (C) 2025  Flokart World, Inc.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+[build]
+# Use all available cores for compilation
+jobs = -1
+
+[target.'cfg(all())']
+rustflags = [
+    "-W", "rust-2018-idioms",
+    "-W", "rust-2024-compatibility",
+]
+
+# Lints configuration for the workspace
+[workspace.lints.clippy]
+# Enable warning level for standard lints
+all = "warn"
+# Enable pedantic lints for better code quality
+pedantic = "warn"
+# Disable nursery (experimental) lints for stability
+nursery = "allow"
+# Enable cargo-related lints
+cargo = "warn"
+
+# Specific lint adjustments based on project needs
+module_name_repetitions = "allow"  # Allow Sink::Sink pattern
+must_use_candidate = "allow"        # Not all functions need must_use
+missing_errors_doc = "allow"        # Error documentation not mandatory
+missing_panics_doc = "allow"        # Panic documentation not mandatory
+
+[workspace.lints.rust]
+# Warn on unused features
+unused = "warn"
+# Ensure 2018 edition idioms
+rust_2018_idioms = "warn"

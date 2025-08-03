@@ -14,13 +14,16 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::cell::RefCell;
 
 use libpulse_binding::{
-    context::{Context, introspect::{SinkInfo, SourceInfo}},
     callbacks::ListResult,
+    context::{
+        Context,
+        introspect::{SinkInfo, SourceInfo},
+    },
 };
 use log::{debug, error, info};
 
@@ -72,10 +75,11 @@ trait DeviceType {
     type Info<'a>;
     fn name_lower_case() -> &'static str;
     fn name_camel_case() -> &'static str;
+    #[allow(dead_code)]
     fn select(devices: &AudioDeviceRoot) -> &AudioDeviceGroup;
     fn select_mut(devices: &mut AudioDeviceRoot) -> &mut AudioDeviceGroup;
     fn get_definitions(config: &Config) -> &HashMap<String, DeviceConfig>;
-    fn set_default(context: &mut Context, name: &String, callback: impl FnMut(bool) + 'static);
+    fn set_default(context: &mut Context, name: &str, callback: impl FnMut(bool) + 'static);
     fn extract_info<'a, 'b>(info: &'a Self::Info<'b>) -> DeviceInfo<'a>;
 }
 
@@ -104,7 +108,7 @@ impl DeviceType for Sink {
         &config.sinks
     }
 
-    fn set_default(context: &mut Context, name: &String, callback: impl FnMut(bool) + 'static) {
+    fn set_default(context: &mut Context, name: &str, callback: impl FnMut(bool) + 'static) {
         context.set_default_sink(name, callback);
     }
 
@@ -143,7 +147,7 @@ impl DeviceType for Source {
         &config.sources
     }
 
-    fn set_default(context: &mut Context, name: &String, callback: impl FnMut(bool) + 'static) {
+    fn set_default(context: &mut Context, name: &str, callback: impl FnMut(bool) + 'static) {
         context.set_default_source(name, callback);
     }
 
@@ -157,7 +161,10 @@ impl DeviceType for Source {
     }
 }
 
-fn check_device_match(device_config: &DeviceConfig, proplist: &libpulse_binding::proplist::Proplist) -> bool {
+fn check_device_match(
+    device_config: &DeviceConfig,
+    proplist: &libpulse_binding::proplist::Proplist,
+) -> bool {
     if let Some(detect) = &device_config.detect {
         for (key, expected_value) in detect {
             if let Some(actual_value) = proplist.get_str(key) {
@@ -202,7 +209,8 @@ impl State {
             recognized_as: Vec::new(),
         };
 
-        info!("Found {} #{}, name = {}, description = {}",
+        info!(
+            "Found {} #{}, name = {}, description = {}",
             T::name_lower_case(),
             device_info.index,
             device.original_name,
@@ -211,7 +219,8 @@ impl State {
 
         for (name, device_config) in configs {
             if check_device_match(device_config, device_info.proplist) {
-                info!("{} #{} is detected as '{}'",
+                info!(
+                    "{} #{} is detected as '{}'",
                     T::name_camel_case(),
                     device_info.index,
                     name
@@ -231,20 +240,24 @@ impl State {
     {
         let devices = &mut T::select_mut(&mut self.all_devices).found_devices;
 
-        if let Some(_) = devices.remove(&index) {
+        if devices.remove(&index).is_some() {
             info!("Lost {} #{}", T::name_lower_case(), index);
         }
     }
 
-    fn find_default_device<'a>(devices: &'a HashMap<u32, AudioDevice>, configs: &'a HashMap<String, DeviceConfig>) -> Option<(&'a String, u32)> {
-        devices.iter()
+    fn find_default_device<'a>(
+        devices: &'a HashMap<u32, AudioDevice>,
+        configs: &'a HashMap<String, DeviceConfig>,
+    ) -> Option<(&'a String, u32)> {
+        devices
+            .iter()
             .flat_map(|(&device_index, device)| {
-                device.recognized_as.iter()
-                    .filter_map(move |config_name| {
-                        configs.get(config_name)
-                            .and_then(|config| config.priority)
-                            .map(|priority| (device_index, config_name, priority))
-                    })
+                device.recognized_as.iter().filter_map(move |config_name| {
+                    configs
+                        .get(config_name)
+                        .and_then(|config| config.priority)
+                        .map(|priority| (device_index, config_name, priority))
+                })
             })
             .min_by_key(|&(_, _, priority)| priority)
             .map(|(index, config_name, _)| (config_name, index))
@@ -256,13 +269,21 @@ impl State {
     {
         let state = T::select_mut(&mut self.all_devices);
         if success {
-            info!("Successfully set default {} to #{}", T::name_lower_case(), device_index);
+            info!(
+                "Successfully set default {} to #{}",
+                T::name_lower_case(),
+                device_index
+            );
             if let Some(callback) = state.pending_default_callback.take() {
                 // Target changed during execution, retry with current target
                 let new_device_index = state.pending_default_index.unwrap();
                 if let Some(new_device) = state.found_devices.get(&new_device_index) {
-                    debug!("Setting default {} to #{}", T::name_lower_case(), new_device_index);
-                    let _op = T::set_default(&mut self.context, &new_device.original_name, callback);
+                    debug!(
+                        "Setting default {} to #{}",
+                        T::name_lower_case(),
+                        new_device_index
+                    );
+                    T::set_default(&mut self.context, &new_device.original_name, callback);
                 }
             }
         } else {
@@ -281,31 +302,50 @@ pub struct StateRunner<'scope> {
     state: &'scope mut State,
 }
 
-
 impl<'scope> StateRunner<'scope> {
     fn update_default_device<T: DeviceType>(&mut self) {
-        let State { all_devices: devices, context, .. } = self.state;
+        let State {
+            all_devices: devices,
+            context,
+            ..
+        } = self.state;
         let scope = T::select_mut(devices);
-        let default_device = State::find_default_device(&scope.found_devices, T::get_definitions(&self.state.config));
+        let default_device = State::find_default_device(
+            &scope.found_devices,
+            T::get_definitions(&self.state.config),
+        );
 
         if let Some((config_name, device_index)) = default_device {
             let weak_origin = Rc::downgrade(&self.origin);
             let callback = move |success: bool| {
                 if let Some(origin) = weak_origin.upgrade() {
                     StateRunner::with(&origin, |runner| {
-                        runner.state.handle_set_default_result::<T>(device_index, success);
+                        runner
+                            .state
+                            .handle_set_default_result::<T>(device_index, success);
                     });
                 }
             };
 
-            info!("Using {} '{}' as default", T::name_lower_case(), config_name);
+            info!(
+                "Using {} '{}' as default",
+                T::name_lower_case(),
+                config_name
+            );
             let pending = scope.pending_default_index.take().is_some();
             scope.pending_default_index = Some(device_index);
             if pending {
-                debug!("Default {} is being changed... deferring setting", T::name_lower_case());
+                debug!(
+                    "Default {} is being changed... deferring setting",
+                    T::name_lower_case()
+                );
                 scope.pending_default_callback = Some(Box::new(callback));
             } else if let Some(device) = scope.found_devices.get(&device_index) {
-                debug!("Setting default {} to #{}", T::name_lower_case(), device_index);
+                debug!(
+                    "Setting default {} to #{}",
+                    T::name_lower_case(),
+                    device_index
+                );
                 T::set_default(context, &device.original_name, callback);
             }
         } else {
@@ -314,7 +354,9 @@ impl<'scope> StateRunner<'scope> {
         }
     }
 
-    fn make_device_callback<T: DeviceType>(&self) -> impl for<'a, 'b> FnMut(ListResult<&'a T::Info<'b>>) + 'static {
+    fn make_device_callback<T: DeviceType>(
+        &self,
+    ) -> impl for<'a, 'b> FnMut(ListResult<&'a T::Info<'b>>) + 'static {
         let weak_origin = Rc::downgrade(&self.origin);
         let mut should_update = false;
         move |list_result| {
@@ -325,7 +367,7 @@ impl<'scope> StateRunner<'scope> {
                             let match_count = runner.state.add_device::<T>(info);
                             should_update = should_update || match_count > 0;
                         });
-                    },
+                    }
                     ListResult::End => {
                         debug!("Finished loading list result for {}s", T::name_lower_case());
                         if should_update {
@@ -333,7 +375,7 @@ impl<'scope> StateRunner<'scope> {
                                 runner.update_default_device::<T>();
                             });
                         }
-                    },
+                    }
                     ListResult::Error => {
                         error!("Error loading list result for {}s", T::name_lower_case());
                     }
@@ -349,22 +391,33 @@ impl<'scope> StateRunner<'scope> {
 
     fn query_sink_by_index(&mut self, index: u32) {
         let callback = self.make_device_callback::<Sink>();
-        let _op = self.state.context.introspect().get_sink_info_by_index(index, callback);
+        let _op = self
+            .state
+            .context
+            .introspect()
+            .get_sink_info_by_index(index, callback);
     }
 
     fn query_all_sources(&mut self) {
         let callback = self.make_device_callback::<Source>();
-        let _op = self.state.context.introspect().get_source_info_list(callback);
+        let _op = self
+            .state
+            .context
+            .introspect()
+            .get_source_info_list(callback);
     }
 
     fn query_source_by_index(&mut self, index: u32) {
         let callback = self.make_device_callback::<Source>();
-        let _op = self.state.context.introspect().get_source_info_by_index(index, callback);
+        let _op = self
+            .state
+            .context
+            .introspect()
+            .get_source_info_by_index(index, callback);
     }
 
     fn subscribe_to_events(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let interests =
-            libpulse_binding::context::subscribe::InterestMaskSet::SINK
+        let interests = libpulse_binding::context::subscribe::InterestMaskSet::SINK
             | libpulse_binding::context::subscribe::InterestMaskSet::SOURCE;
 
         let weak_origin = Rc::downgrade(&self.origin);
@@ -388,7 +441,7 @@ impl<'scope> StateRunner<'scope> {
     fn on_context_state_changed(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let context_state = self.state.context.get_state();
 
-        debug!("The context state is <{:?}> now", context_state);
+        debug!("The context state is <{context_state:?}> now");
 
         if context_state == libpulse_binding::context::State::Ready {
             info!("Connected to PulseAudio server");
@@ -404,7 +457,8 @@ impl<'scope> StateRunner<'scope> {
         // Since callbacks will be called within pa_context_connect(),
         // we call connect() before registering callbacks to prevent race
         // condition.
-        context.connect(None, libpulse_binding::context::FlagSet::NOAUTOSPAWN, None)
+        context
+            .connect(None, libpulse_binding::context::FlagSet::NOAUTOSPAWN, None)
             .map_err(|_| "Failed to connect to PulseAudio")?;
 
         let weak_origin = Rc::downgrade(&self.origin);
@@ -412,7 +466,7 @@ impl<'scope> StateRunner<'scope> {
             if let Some(origin) = weak_origin.upgrade() {
                 StateRunner::with(&origin, |runner| {
                     if let Err(e) = runner.on_context_state_changed() {
-                        error!("Failed to handle state change: {}", e);
+                        error!("Failed to handle state change: {e}");
                     }
                 });
             }
@@ -421,44 +475,39 @@ impl<'scope> StateRunner<'scope> {
         let weak_origin = Rc::downgrade(&self.origin);
         context.set_subscribe_callback(Some(Box::new(move |facility, operation, index| {
             if let Some(origin) = weak_origin.upgrade() {
-                StateRunner::with(&origin, |runner| {
-                    match facility {
-                        Some(libpulse_binding::context::subscribe::Facility::Sink) => {
-                            match operation {
-                                Some(libpulse_binding::context::subscribe::Operation::New) => {
-                                    debug!("Got notified by new sink #{}", index);
-                                    runner.query_sink_by_index(index);
-                                },
-                                Some(libpulse_binding::context::subscribe::Operation::Removed) => {
-                                    debug!("Got notified by removed sink #{}", index);
-                                    runner.state.remove_device::<Sink>(index);
-                                    runner.update_default_device::<Sink>();
-                                },
-                                Some(libpulse_binding::context::subscribe::Operation::Changed) => {
-                                    debug!("Got notified by changed sink #{}", index);
-                                },
-                                _ => {}
-                            }
-                        },
-                        Some(libpulse_binding::context::subscribe::Facility::Source) => {
-                            match operation {
-                                Some(libpulse_binding::context::subscribe::Operation::New) => {
-                                    debug!("Got notified by new source #{}", index);
-                                    runner.query_source_by_index(index);
-                                },
-                                Some(libpulse_binding::context::subscribe::Operation::Removed) => {
-                                    debug!("Got notified by removed source #{}", index);
-                                    runner.state.remove_device::<Source>(index);
-                                    runner.update_default_device::<Source>();
-                                },
-                                Some(libpulse_binding::context::subscribe::Operation::Changed) => {
-                                    debug!("Got notified by changed source #{}", index);
-                                },
-                                _ => {}
-                            }
-                        },
+                StateRunner::with(&origin, |runner| match facility {
+                    Some(libpulse_binding::context::subscribe::Facility::Sink) => match operation {
+                        Some(libpulse_binding::context::subscribe::Operation::New) => {
+                            debug!("Got notified by new sink #{index}");
+                            runner.query_sink_by_index(index);
+                        }
+                        Some(libpulse_binding::context::subscribe::Operation::Removed) => {
+                            debug!("Got notified by removed sink #{index}");
+                            runner.state.remove_device::<Sink>(index);
+                            runner.update_default_device::<Sink>();
+                        }
+                        Some(libpulse_binding::context::subscribe::Operation::Changed) => {
+                            debug!("Got notified by changed sink #{index}");
+                        }
                         _ => {}
-                    }
+                    },
+                    Some(libpulse_binding::context::subscribe::Facility::Source) => match operation
+                    {
+                        Some(libpulse_binding::context::subscribe::Operation::New) => {
+                            debug!("Got notified by new source #{index}");
+                            runner.query_source_by_index(index);
+                        }
+                        Some(libpulse_binding::context::subscribe::Operation::Removed) => {
+                            debug!("Got notified by removed source #{index}");
+                            runner.state.remove_device::<Source>(index);
+                            runner.update_default_device::<Source>();
+                        }
+                        Some(libpulse_binding::context::subscribe::Operation::Changed) => {
+                            debug!("Got notified by changed source #{index}");
+                        }
+                        _ => {}
+                    },
+                    _ => {}
                 });
             }
         })));
@@ -469,11 +518,11 @@ impl<'scope> StateRunner<'scope> {
 
     pub fn with<Fn, Ret>(scope: &Rc<RefCell<State>>, proc: Fn) -> Ret
     where
-        Fn: FnOnce(&mut StateRunner) -> Ret,
+        Fn: FnOnce(&mut StateRunner<'_>) -> Ret,
     {
         let mut runner = StateRunner {
             origin: Rc::clone(scope),
-            state: &mut *scope.borrow_mut(),
+            state: &mut scope.borrow_mut(),
         };
         proc(&mut runner)
     }
