@@ -268,29 +268,18 @@ sources:
 
 #[test]
 fn test_connection_to_nonexistent_server() {
-    use std::process::Stdio;
+    use helpers::OutputCapturer;
 
     // /dev/null as server guarantees connection failure
-    let output = Command::new("cargo")
-        .args(&["run", "--", "--server", "/dev/null"])
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("Failed to run autopulsed");
+    let mut cmd = Command::new("cargo");
+    cmd.args(&["run", "--", "--server", "/dev/null"])
+        .env("RUST_LOG", "info");
 
-    assert!(
-        !output.status.success(),
-        "Should fail to connect to /dev/null"
-    );
+    let mut autopulsed =
+        OutputCapturer::spawn(cmd).expect("Failed to spawn autopulsed");
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    println!("STDERR: {}", stderr);
-
-    assert!(
-        stderr.contains("Failed to connect to PulseAudio"),
-        "Should report connection failure"
-    );
+    autopulsed.assert_exit_failure(Duration::from_secs(2));
+    autopulsed.expect_string("Failed to connect to PulseAudio");
 }
 
 #[test]
@@ -303,7 +292,7 @@ fn test_server_option_overrides_env() {
     // PULSE_SERVER env should be overridden by --server option
     let mut cmd = Command::new("cargo");
     cmd.args(&["run", "--", "--server", &server.socket_path(), "--verbose"])
-        .env("PULSE_SERVER", "/dev/null") // This should be ignored
+        .env("PULSE_SERVER", "/dev/null")
         .env("RUST_LOG", "debug");
 
     eprintln!("TEST: Running cargo with PULSE_SERVER=/dev/null");

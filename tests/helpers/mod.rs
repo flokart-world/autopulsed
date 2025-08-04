@@ -16,7 +16,7 @@
 
 use regex::Regex;
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -63,6 +63,9 @@ use std::time::{Duration, Instant};
 /// capturer.expect_regex(r"Connected clients: \d+");
 /// capturer.expect_regex(r"Port: \d{4}")
 ///
+/// // Method 5: Check early exit with failure
+/// capturer.assert_exit_failure(Duration::from_secs(2));
+///
 /// // Clean up
 /// capturer.kill().ok();
 /// ```
@@ -73,6 +76,9 @@ use std::time::{Duration, Instant};
 /// - `expect_regex()` - Regular expression matching
 /// - `expect_string_timeout()` - String matching with custom timeout
 /// - `expect_regex_timeout()` - Regex matching with custom timeout
+/// - `assert_exit_failure()` - Assert process exits with error
+/// - `assert_exit_success()` - Assert process exits successfully
+/// - `wait_for_exit()` - Wait for process exit and get status
 ///
 /// # Key Features
 ///
@@ -250,6 +256,78 @@ impl OutputCapturer {
     /// Kill the process
     pub fn kill(&mut self) -> Result<(), std::io::Error> {
         self.child.kill()
+    }
+
+    /// Wait for process to exit and return exit status
+    pub fn wait_for_exit(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<ExitStatus, String> {
+        let start = Instant::now();
+
+        while start.elapsed() < timeout {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    // Wait for threads to finish collecting remaining output
+                    if let Some(thread) = self.reader_thread.take() {
+                        let _ = thread.join();
+                    }
+                    return Ok(status);
+                }
+                Ok(None) => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to check process status: {}",
+                        e
+                    ));
+                }
+            }
+        }
+
+        Err(format!("Process did not exit within {:?}", timeout))
+    }
+
+    /// Check if process is still running
+    pub fn is_running(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(None) => true,
+            _ => false,
+        }
+    }
+
+    /// Assert that process exited with failure
+    pub fn assert_exit_failure(&mut self, timeout: Duration) {
+        match self.wait_for_exit(timeout) {
+            Ok(status) => {
+                if status.success() {
+                    panic!("Expected process to fail, but it succeeded");
+                }
+                eprintln!("✓ Process exited with failure as expected");
+            }
+            Err(e) => {
+                panic!("Failed to get exit status: {}", e);
+            }
+        }
+    }
+
+    /// Assert that process exited with success
+    pub fn assert_exit_success(&mut self, timeout: Duration) {
+        match self.wait_for_exit(timeout) {
+            Ok(status) => {
+                if !status.success() {
+                    panic!(
+                        "Expected process to succeed, but it failed with status: {:?}",
+                        status
+                    );
+                }
+                eprintln!("✓ Process exited successfully");
+            }
+            Err(e) => {
+                panic!("Failed to get exit status: {}", e);
+            }
+        }
     }
 }
 
