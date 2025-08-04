@@ -90,6 +90,7 @@ dependencies = [
  "env_logger",
  "libpulse-binding",
  "log",
+ "regex",
  "serde",
  "serde_yaml",
  "tempfile",
