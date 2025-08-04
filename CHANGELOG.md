@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2025-08-04
+
+### Added
+- `--server` option to specify custom PulseAudio server address (e.g., `--server unix:/run/user/1000/pulse/native`)
+- GitHub Actions CI workflow for automated testing and code quality checks
+- Pre-commit hooks to ensure code quality before commits
+
+### Developer Experience
+- New CI pipeline with:
+  - Format checking (rustfmt)
+  - Linting (clippy)
+  - Unit tests
+  - Integration tests with isolated PulseAudio
+  - Testing on Rust 1.85.0 (minimum version) and stable
+  - Release binary builds
+- Pre-commit hooks validate staged content to prevent formatting issues
+
 ## [0.1.0] - 2025-08-03
 
 ### Added
