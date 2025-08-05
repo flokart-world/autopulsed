@@ -37,6 +37,7 @@ use state::{State, StateRunner};
 
 #[derive(Parser)]
 #[command(name = env!("CARGO_PKG_NAME"))]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = env!("CARGO_PKG_DESCRIPTION"))]
 struct Args {
     #[arg(short, long, value_name = "FILE")]
