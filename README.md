@@ -9,10 +9,11 @@ A daemon for adjusting PulseAudio settings automatically based on device connect
 - YAML-based configuration
 - Real-time monitoring of audio device connections and disconnections
 - Automatic default device switching
+- Automatic remap device creation and removal based on master device availability
+- Circular reference detection in remap configurations
 
 ### Planned for future
 
-- Automatic remap device creation
 - Hot-reloading configuration
 
 ## Building
@@ -35,10 +36,32 @@ See help.
 autopulsed --help
 ```
 
+### Systemd service setup
+
+Example systemd user service file `~/.config/systemd/user/autopulsed.service`:
+
+```ini
+[Unit]
+Description=Automatic PulseAudio device management daemon
+# For PipeWire users, use pipewire-pulse.service instead of pulseaudio.service
+After=pulseaudio.service
+Requires=pulseaudio.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/autopulsed --config %h/.config/autopulsed/config.yml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
 ## Configuration example
 
 ```yaml
 sinks:
+  # Regular device detection
   hdmi:
     priority: 2
     detect:
@@ -54,6 +77,18 @@ sinks:
     detect:
       device.bus: "usb"
       device.serial: "Focusrite_Scarlett_2i2_4th_Gen_XXXXXXXXXXXXXX"
+
+  # Remap device - created when 'scarlett' device is detected
+  scarlett_4ch_remap:
+    priority: 1
+    remap:
+      master: "scarlett"  # Reference to another device name
+      device_name: "scarlett_4ch"
+      device_properties:
+        device.description: "Scarlett 2i2 4th Gen (4ch)"
+      channels: 4
+      channel_map: "front-left,front-right,rear-left,rear-right"
+
 sources:
   iec958:
     priority: 2
@@ -66,3 +101,27 @@ sources:
       device.bus: "usb"
       device.serial: "Focusrite_Scarlett_2i2_4th_Gen_XXXXXXXXXXXXXX"
 ```
+
+### Configuration options
+
+#### Device detection (`detect`)
+Matches devices based on PulseAudio properties:
+- `device.bus`: Device bus type (e.g., "pci", "usb")
+- `device.bus_path`: Bus path identifier
+- `device.serial`: Device serial number
+- Any other PulseAudio device property
+
+#### Remap devices (`remap`)
+Creates virtual devices using PulseAudio's remap modules:
+- `master`: Name of the master device (must be defined in the same configuration)
+- `device_name`: Name for the remapped device
+- `device_properties`: Key-value pairs for device properties (e.g., `device.description: "My Device"`)
+- `format`: Audio format (e.g., "s16le", "float32le")
+- `rate`: Sample rate (e.g., 44100, 48000)
+- `channels`: Number of channels
+- `channel_map`: Channel mapping (e.g., "front-left,front-right")
+- `master_channel_map`: Master device channel mapping
+- `resample_method`: Resampling method
+- `remix`: Enable remixing (true/false)
+
+Remap devices are automatically created when their master device appears and removed when the master device disappears.

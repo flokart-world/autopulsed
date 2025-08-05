@@ -14,17 +14,20 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use clap::Parser;
 use libpulse_binding::{
     context::Context,
-    mainloop::standard::{IterateResult, Mainloop},
+    mainloop::{
+        signal::{Event as SignalEvent, MainloopSignals},
+        standard::{IterateResult, Mainloop},
+    },
     proplist::Proplist,
 };
-use log::{error, info};
+use log::{debug, error, info};
 
 mod config;
 mod state;
@@ -52,11 +55,16 @@ struct Args {
 }
 
 struct App {
-    mainloop: Mainloop,
+    mainloop: Rc<RefCell<Mainloop>>,
     // State must be kept alive for PulseAudio callbacks to work properly.
     // Even though not directly accessed in run(), dropping it would cause
     // callbacks to fail since they hold weak references to this state.
-    _state: Rc<RefCell<State>>,
+    state: Rc<RefCell<State>>,
+    // Signal handlers for SIGINT (Ctrl+C) and SIGTERM
+    _sigint_handler: Option<SignalEvent>,
+    _sigterm_handler: Option<SignalEvent>,
+    // Flag to indicate quit was requested
+    quit_requested: Rc<Cell<bool>>,
 }
 
 impl App {
@@ -72,14 +80,19 @@ impl App {
             )
             .map_err(|_| "Failed to set application name")?;
 
-        let mainloop = Mainloop::new().ok_or("Failed to create mainloop")?;
+        let mainloop = Rc::new(RefCell::new(
+            Mainloop::new().ok_or("Failed to create mainloop")?,
+        ));
 
-        let context = Context::new_with_proplist(
-            &mainloop,
-            env!("CARGO_PKG_NAME"),
-            &proplist,
-        )
-        .ok_or("Failed to create context")?;
+        let context = {
+            let mainloop_ref = mainloop.borrow();
+            Context::new_with_proplist(
+                &*mainloop_ref,
+                env!("CARGO_PKG_NAME"),
+                &proplist,
+            )
+            .ok_or("Failed to create context")?
+        };
 
         let state = State::from_context(context, config);
 
@@ -95,18 +108,54 @@ impl App {
 
         Ok(App {
             mainloop,
-            _state: state,
+            state,
+            _sigint_handler: None,
+            _sigterm_handler: None,
+            quit_requested: Rc::new(Cell::new(false)),
         })
     }
 
+    fn setup_signal_handler(
+        &mut self,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const SIGINT: i32 = 2;
+        const SIGTERM: i32 = 15;
+
+        let create_signal_handler = |sig: i32, sig_name: &'static str| {
+            let quit_flag = self.quit_requested.clone();
+            SignalEvent::new(sig, move |_sig| {
+                info!("Received {sig_name}, shutting down gracefully...");
+                quit_flag.set(true);
+            })
+        };
+
+        let sigint_handler = create_signal_handler(SIGINT, "SIGINT");
+        let sigterm_handler = create_signal_handler(SIGTERM, "SIGTERM");
+
+        self._sigint_handler = Some(sigint_handler);
+        self._sigterm_handler = Some(sigterm_handler);
+
+        // Initialize AFTER creating signal handlers to prevent race condition
+        self.mainloop.borrow_mut().init_signals()?;
+
+        Ok(())
+    }
+
     fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.setup_signal_handler()?;
+
         info!(
             "{} started - monitoring audio device changes",
             env!("CARGO_PKG_NAME")
         );
 
         loop {
-            match self.mainloop.iterate(true) {
+            if self.quit_requested.get() {
+                info!("Signal received, initiating shutdown");
+                break;
+            }
+
+            match self.mainloop.borrow_mut().iterate(true) {
                 IterateResult::Quit(_) => {
                     info!("Mainloop quit");
                     break;
@@ -119,6 +168,44 @@ impl App {
             }
         }
 
+        info!("Cleaning up resources");
+        self.state.borrow_mut().begin_shutdown();
+        StateRunner::with(&self.state, |runner| {
+            runner.cleanup_remap_modules();
+        });
+
+        if !self.state.borrow().has_pending_unloads() {
+            info!("No modules to clean up, exiting");
+            return Ok(());
+        }
+
+        loop {
+            match self.mainloop.borrow_mut().iterate(true) {
+                IterateResult::Quit(_) => {
+                    info!("Mainloop quit");
+                    break;
+                }
+                IterateResult::Err(_) => {
+                    error!("Error during cleanup");
+                    break;
+                }
+                IterateResult::Success(_) => {
+                    if !self.state.borrow().has_pending_unloads() {
+                        info!("All modules unloaded, cleanup completed");
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Skip signal cleanup to avoid crashes
+        // The main() function will call std::process::exit(0) which will
+        // bypass all destructors, preventing the double-free issue in
+        // libpulse-binding's signal handling code.
+        debug!(
+            "Skipping signal cleanup - will exit via std::process::exit(0)"
+        );
+
         Ok(())
     }
 }
@@ -130,6 +217,10 @@ fn load_config(
         let content = std::fs::read_to_string(&path)?;
         let config: Config = serde_yaml::from_str(&content)?;
         info!("Loaded config from: {}", path.display());
+
+        // Validate configuration
+        config.validate()?;
+
         Ok(config)
     } else {
         info!("Using default configuration");
@@ -159,5 +250,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     app.run()?;
 
-    Ok(())
+    // WORKAROUND: Due to libpulse-binding's signal handling design flaw,
+    // we need to exit immediately to avoid double-free crashes during cleanup.
+    // The library has a fundamental issue where signals_done() and SignalEvent::drop()
+    // both call pa_signal_free(), causing assertion failures. This violates Rust's
+    // safety principles - safe code should never cause such crashes.
+    // Using std::process::exit(0) bypasses all destructors, preventing the issue.
+    std::process::exit(0);
 }

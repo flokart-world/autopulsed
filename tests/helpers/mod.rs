@@ -113,7 +113,7 @@ impl OutputCapturer {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    println!("STDOUT: {}", line); // Aid debugging when tests fail
+                    println!("STDOUT: {line}"); // Aid debugging when tests fail
                     if let Ok(mut out) = output_clone1.lock() {
                         out.push_str(&line);
                         out.push('\n');
@@ -127,7 +127,7 @@ impl OutputCapturer {
             let reader = BufReader::new(stderr);
             for line in reader.lines() {
                 if let Ok(line) = line {
-                    println!("STDERR: {}", line); // Aid debugging when tests fail
+                    println!("STDERR: {line}"); // Aid debugging when tests fail
                     if let Ok(mut out) = output_clone2.lock() {
                         out.push_str(&line);
                         out.push('\n');
@@ -173,7 +173,7 @@ impl OutputCapturer {
                 out
             ))
         } else {
-            Err(format!("Timeout waiting for '{}'", pattern))
+            Err(format!("Timeout waiting for '{pattern}'"))
         }
     }
 
@@ -184,7 +184,7 @@ impl OutputCapturer {
         timeout: Duration,
     ) -> Result<(), String> {
         let re = Regex::new(pattern)
-            .map_err(|e| format!("Invalid regex '{}': {}", pattern, e))?;
+            .map_err(|e| format!("Invalid regex '{pattern}': {e}"))?;
 
         let start = Instant::now();
 
@@ -205,7 +205,7 @@ impl OutputCapturer {
                 out
             ))
         } else {
-            Err(format!("Timeout waiting for regex '{}'", pattern))
+            Err(format!("Timeout waiting for regex '{pattern}'"))
         }
     }
 
@@ -222,11 +222,11 @@ impl OutputCapturer {
     ) -> &Self {
         match self.wait_for(pattern, timeout) {
             Ok(()) => {
-                eprintln!("✓ Found: {}", pattern);
+                eprintln!("✓ Found: {pattern}");
                 self
             }
             Err(e) => {
-                panic!("Failed to find pattern '{}': {}", pattern, e);
+                panic!("Failed to find pattern '{pattern}': {e}");
             }
         }
     }
@@ -244,13 +244,57 @@ impl OutputCapturer {
     ) -> &Self {
         match self.wait_for_regex(pattern, timeout) {
             Ok(()) => {
-                eprintln!("✓ Found regex: {}", pattern);
+                eprintln!("✓ Found regex: {pattern}");
                 self
             }
             Err(e) => {
-                panic!("Failed to find regex '{}': {}", pattern, e);
+                panic!("Failed to find regex '{pattern}': {e}");
             }
         }
+    }
+
+    /// Expect string to NOT appear within timeout
+    pub fn expect_no_string(&self, pattern: &str, timeout: Duration) -> &Self {
+        let start = Instant::now();
+
+        while start.elapsed() < timeout {
+            let output = self.output.lock().unwrap();
+            if output.contains(pattern) {
+                eprintln!("=== Full output ===");
+                eprintln!("{}", *output);
+                eprintln!("==================");
+                panic!("Found unexpected pattern '{pattern}' in output");
+            }
+            drop(output);
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        eprintln!("✓ Pattern not found as expected: {pattern}");
+        self
+    }
+
+    /// Expect regex to NOT match within timeout
+    pub fn expect_no_regex(&self, pattern: &str, timeout: Duration) -> &Self {
+        let re = regex::Regex::new(pattern)
+            .map_err(|e| format!("Invalid regex '{pattern}': {e}"))
+            .unwrap();
+
+        let start = Instant::now();
+
+        while start.elapsed() < timeout {
+            let output = self.output.lock().unwrap();
+            if re.is_match(&output) {
+                eprintln!("=== Full output ===");
+                eprintln!("{}", *output);
+                eprintln!("==================");
+                panic!("Found unexpected regex match '{pattern}' in output");
+            }
+            drop(output);
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        eprintln!("✓ Regex not matched as expected: {pattern}");
+        self
     }
 
     /// Kill the process
@@ -279,14 +323,13 @@ impl OutputCapturer {
                 }
                 Err(e) => {
                     return Err(format!(
-                        "Failed to check process status: {}",
-                        e
+                        "Failed to check process status: {e}"
                     ));
                 }
             }
         }
 
-        Err(format!("Process did not exit within {:?}", timeout))
+        Err(format!("Process did not exit within {timeout:?}"))
     }
 
     /// Check if process is still running
@@ -307,7 +350,7 @@ impl OutputCapturer {
                 eprintln!("✓ Process exited with failure as expected");
             }
             Err(e) => {
-                panic!("Failed to get exit status: {}", e);
+                panic!("Failed to get exit status: {e}");
             }
         }
     }
@@ -318,14 +361,13 @@ impl OutputCapturer {
             Ok(status) => {
                 if !status.success() {
                     panic!(
-                        "Expected process to succeed, but it failed with status: {:?}",
-                        status
+                        "Expected process to succeed, but it failed with status: {status:?}"
                     );
                 }
                 eprintln!("✓ Process exited successfully");
             }
             Err(e) => {
-                panic!("Failed to get exit status: {}", e);
+                panic!("Failed to get exit status: {e}");
             }
         }
     }

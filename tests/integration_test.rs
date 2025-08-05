@@ -48,15 +48,15 @@ impl IsolatedPulseServer {
 
 # Load only the necessary modules
 .fail
-load-module module-native-protocol-unix socket={} auth-anonymous=1
+load-module module-native-protocol-unix socket={socket_str} auth-anonymous=1
 load-module module-null-sink sink_name=test_sink_1 sink_properties=device.description=TestSink1
 load-module module-null-sink sink_name=test_sink_2 sink_properties=device.description=TestSink2
-", socket_str))?;
+"))?;
 
-        eprintln!("TEST: Starting PulseAudio with socket at: {}", socket_str);
+        eprintln!("TEST: Starting PulseAudio with socket at: {socket_str}");
         eprintln!("TEST: Config file: {}", config_path.display());
         let mut process = Command::new("pulseaudio")
-            .args(&[
+            .args([
                 "-n", // Don't load default script to avoid conflicts
                 "--daemonize=no",
                 "--use-pid-file=no",
@@ -80,8 +80,7 @@ load-module module-null-sink sink_name=test_sink_2 sink_properties=device.descri
         thread::sleep(Duration::from_millis(100));
         if let Ok(Some(status)) = process.try_wait() {
             return Err(format!(
-                "PulseAudio process exited immediately with status: {:?}",
-                status
+                "PulseAudio process exited immediately with status: {status:?}"
             )
             .into());
         }
@@ -108,7 +107,7 @@ load-module module-null-sink sink_name=test_sink_2 sink_properties=device.descri
             }
 
             let output = Command::new("pactl")
-                .args(&["--server", &socket_str_for_check, "info"])
+                .args(["--server", &socket_str_for_check, "info"])
                 .output();
 
             if let Ok(output) = output {
@@ -126,8 +125,7 @@ load-module module-null-sink sink_name=test_sink_2 sink_properties=device.descri
                         break;
                     } else {
                         eprintln!(
-                            "TEST: pactl returned success but unexpected output: {}",
-                            stdout
+                            "TEST: pactl returned success but unexpected output: {stdout}"
                         );
                     }
                 } else {
@@ -152,7 +150,7 @@ load-module module-null-sink sink_name=test_sink_2 sink_properties=device.descri
                 use std::io::Read;
                 let mut stderr_output = String::new();
                 stderr.read_to_string(&mut stderr_output).ok();
-                eprintln!("TEST: PulseAudio stderr output: {}", stderr_output);
+                eprintln!("TEST: PulseAudio stderr output: {stderr_output}");
             }
             return Err("PulseAudio server failed to become ready".into());
         }
@@ -166,7 +164,7 @@ load-module module-null-sink sink_name=test_sink_2 sink_properties=device.descri
 
     fn socket_path(&self) -> String {
         let path = format!("unix:{}", self.socket_path.display());
-        eprintln!("TEST: Using socket path: {}", path);
+        eprintln!("TEST: Using socket path: {path}");
         path
     }
 }
@@ -176,19 +174,17 @@ impl Drop for IsolatedPulseServer {
         if let Some(mut process) = self.process.take() {
             eprintln!("TEST: Shutting down PulseAudio process");
             if let Err(e) = process.kill() {
-                eprintln!("TEST: Failed to kill PulseAudio process: {}", e);
+                eprintln!("TEST: Failed to kill PulseAudio process: {e}");
             }
             match process.wait() {
                 Ok(status) => {
                     eprintln!(
-                        "TEST: PulseAudio process exited with status: {:?}",
-                        status
+                        "TEST: PulseAudio process exited with status: {status:?}"
                     );
                 }
                 Err(e) => {
                     eprintln!(
-                        "TEST: Failed to wait for PulseAudio process: {}",
-                        e
+                        "TEST: Failed to wait for PulseAudio process: {e}"
                     );
                 }
             }
@@ -231,7 +227,7 @@ sources:
         .expect("Failed to write test config");
 
     let mut cmd = Command::new("cargo");
-    cmd.args(&[
+    cmd.args([
         "run",
         "--",
         "--config",
@@ -242,7 +238,7 @@ sources:
     ])
     .env("RUST_LOG", "debug");
 
-    eprintln!("TEST: Running cargo with args: {:?}", cmd);
+    eprintln!("TEST: Running cargo with args: {cmd:?}");
 
     let mut autopulsed =
         OutputCapturer::spawn(cmd).expect("Failed to spawn autopulsed");
@@ -272,7 +268,7 @@ fn test_connection_to_nonexistent_server() {
 
     // /dev/null as server guarantees connection failure
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "--", "--server", "/dev/null"])
+    cmd.args(["run", "--", "--server", "/dev/null"])
         .env("RUST_LOG", "info");
 
     let mut autopulsed =
@@ -291,7 +287,7 @@ fn test_server_option_overrides_env() {
 
     // PULSE_SERVER env should be overridden by --server option
     let mut cmd = Command::new("cargo");
-    cmd.args(&["run", "--", "--server", &server.socket_path(), "--verbose"])
+    cmd.args(["run", "--", "--server", &server.socket_path(), "--verbose"])
         .env("PULSE_SERVER", "/dev/null")
         .env("RUST_LOG", "debug");
 
@@ -308,4 +304,204 @@ fn test_server_option_overrides_env() {
     eprintln!("TEST: Killing autopulsed process");
     autopulsed.kill().ok();
     eprintln!("TEST: autopulsed process terminated");
+}
+
+#[test]
+fn test_remap_functionality() {
+    use helpers::OutputCapturer;
+
+    let server = IsolatedPulseServer::start()
+        .expect("Failed to start isolated PulseAudio server");
+
+    // Config with remap entries
+    let config_content = r#"
+sinks:
+  master_sink:
+    priority: 1
+    detect:
+      device.description: "TestSink1"
+  remapped_sink:
+    priority: 2
+    remap:
+      master: "master_sink"
+      device_name: "remapped_test_sink"
+      device_properties:
+        device.description: "Remapped Test Sink"
+      channels: 2
+      channel_map: "front-left,front-right"
+
+sources:
+  master_source:
+    priority: 1
+    detect:
+      device.description: "Monitor of TestSink2"
+  remapped_source:
+    priority: 2
+    remap:
+      master: "master_source"
+      device_name: "remapped_test_source"
+      device_properties:
+        device.description: "Remapped Test Source"
+"#;
+
+    let config_path = server.temp_dir.path().join("test_remap_config.yml");
+    std::fs::write(&config_path, config_content)
+        .expect("Failed to write test config");
+
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "run",
+        "--",
+        "--config",
+        config_path.to_str().unwrap(),
+        "--server",
+        &server.socket_path(),
+        "--verbose",
+    ])
+    .env("RUST_LOG", "debug");
+
+    eprintln!("TEST: Running autopulsed with remap config");
+
+    let mut autopulsed =
+        OutputCapturer::spawn(cmd).expect("Failed to spawn autopulsed");
+
+    // Wait for connection
+    autopulsed.expect_string("Connected to PulseAudio server");
+
+    // Verify master devices are detected
+    autopulsed.expect_regex(r"Sink #\d+ is detected as 'master_sink'");
+    autopulsed.expect_regex(r"Source #\d+ is detected as 'master_source'");
+
+    // Verify remap modules are loaded
+    autopulsed.expect_string("Loading sink remap module for 'remapped_sink'");
+    autopulsed.expect_regex(
+        r"Successfully loaded sink remap module #\d+ for 'remapped_sink'",
+    );
+    autopulsed
+        .expect_string("Loading source remap module for 'remapped_source'");
+    autopulsed.expect_regex(
+        r"Successfully loaded source remap module #\d+ for 'remapped_source'",
+    );
+
+    // Verify remap devices are actually created
+    autopulsed.expect_string("Found sink #");
+    autopulsed.expect_string(
+        "name = remapped_test_sink, description = Remapped Test Sink",
+    );
+    autopulsed.expect_string("Found source #");
+    autopulsed.expect_string(
+        "name = remapped_test_source, description = Remapped Test Source",
+    );
+
+    eprintln!("TEST: Remap modules loaded and devices created successfully");
+
+    // TODO: In a real test, we would:
+    // 1. Remove the master device (e.g., unload module-null-sink)
+    // 2. Verify remap modules are unloaded
+    // But this requires more complex PulseAudio manipulation
+
+    eprintln!("TEST: Killing autopulsed process");
+    autopulsed.kill().ok();
+    eprintln!("TEST: Remap test completed successfully");
+}
+
+#[test]
+fn test_circular_reference_detection() {
+    use helpers::OutputCapturer;
+
+    // Config with circular references
+    let config_content = r#"
+sinks:
+  sink_a:
+    priority: 1
+    remap:
+      master: "sink_b"
+      device_name: "circular_a"
+  sink_b:
+    priority: 2
+    remap:
+      master: "sink_c"
+      device_name: "circular_b"
+  sink_c:
+    priority: 3
+    remap:
+      master: "sink_a"
+      device_name: "circular_c"
+"#;
+
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let config_path = temp_dir.path().join("circular_config.yml");
+    std::fs::write(&config_path, config_content)
+        .expect("Failed to write test config");
+
+    let mut cmd = Command::new("cargo");
+    cmd.args(["run", "--", "--config", config_path.to_str().unwrap()])
+        .env("RUST_LOG", "info");
+
+    eprintln!("TEST: Running autopulsed with circular reference config");
+
+    let mut autopulsed =
+        OutputCapturer::spawn(cmd).expect("Failed to spawn autopulsed");
+
+    // Should fail immediately with circular reference error
+    autopulsed.assert_exit_failure(Duration::from_secs(2));
+    // Match any of the three valid cycle patterns
+    autopulsed.expect_regex(
+        r"Circular reference detected in sinks: (sink_a -> sink_b -> sink_c -> sink_a|sink_b -> sink_c -> sink_a -> sink_b|sink_c -> sink_a -> sink_b -> sink_c)"
+    );
+
+    eprintln!(
+        "TEST: Circular reference detection test completed successfully"
+    );
+}
+
+#[test]
+fn test_remap_with_nonexistent_master() {
+    use helpers::OutputCapturer;
+
+    let server = IsolatedPulseServer::start()
+        .expect("Failed to start isolated PulseAudio server");
+
+    // Config with remap referencing non-existent master
+    let config_content = r#"
+sinks:
+  remapped_sink:
+    priority: 1
+    remap:
+      master: "nonexistent_master"
+      device_name: "orphan_remap"
+"#;
+
+    let config_path = server.temp_dir.path().join("orphan_remap_config.yml");
+    std::fs::write(&config_path, config_content)
+        .expect("Failed to write test config");
+
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "run",
+        "--",
+        "--config",
+        config_path.to_str().unwrap(),
+        "--server",
+        &server.socket_path(),
+        "--verbose",
+    ])
+    .env("RUST_LOG", "debug");
+
+    eprintln!("TEST: Running autopulsed with non-existent master reference");
+
+    let mut autopulsed =
+        OutputCapturer::spawn(cmd).expect("Failed to spawn autopulsed");
+
+    // Should start successfully (non-existent master is not an error)
+    autopulsed.expect_string("Connected to PulseAudio server");
+    autopulsed.expect_string("Loaded config from");
+
+    // Should NOT try to load remap module since master doesn't exist
+    autopulsed
+        .expect_no_string("Loading sink remap module", Duration::from_secs(2));
+
+    eprintln!("TEST: Killing autopulsed process");
+    autopulsed.kill().ok();
+    eprintln!("TEST: Non-existent master test completed successfully");
 }

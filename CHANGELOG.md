@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Remap device support for creating virtual audio devices
+  - Automatic creation when master devices appear
+  - Automatic removal when master devices disappear
+  - Support for all PulseAudio module-remap-sink/source parameters
+- Circular reference detection for remap configurations
+- Integration tests for remap functionality
+- New test helper methods: `expect_no_string()` and `expect_no_regex()`
+
+### Configuration
+- New `remap` configuration option alongside existing `detect`
+- Remap parameters include:
+  - `master`: Reference to another device configuration
+  - `device_name`: Name for the virtual device
+  - `device_properties`: Properties string
+  - `format`, `rate`, `channels`: Audio format settings
+  - `channel_map`, `master_channel_map`: Channel routing
+  - `resample_method`, `remix`: Audio processing options
+
 ## [0.1.1] - 2025-08-04
 
 ### Added

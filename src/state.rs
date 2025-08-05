@@ -27,7 +27,7 @@ use libpulse_binding::{
 };
 use log::{debug, error, info};
 
-use crate::config::{Config, DeviceConfig};
+use crate::config::{Config, DeviceConfig, DeviceMatchConfig};
 
 struct AudioDevice {
     original_name: String,
@@ -36,6 +36,7 @@ struct AudioDevice {
 
 struct AudioDeviceGroup {
     found_devices: HashMap<u32, AudioDevice>,
+    remap_module_indices: HashMap<String, u32>,
     pending_default_index: Option<u32>,
     pending_default_callback: Option<Box<dyn FnMut(bool) + 'static>>,
 }
@@ -44,6 +45,7 @@ impl AudioDeviceGroup {
     fn new() -> Self {
         Self {
             found_devices: HashMap::new(),
+            remap_module_indices: HashMap::new(),
             pending_default_index: None,
             pending_default_callback: None,
         }
@@ -69,12 +71,14 @@ struct DeviceInfo<'a> {
     name: Option<&'a str>,
     description: Option<&'a str>,
     proplist: &'a libpulse_binding::proplist::Proplist,
+    owner_module: Option<u32>,
 }
 
 trait DeviceType {
     type Info<'a>;
     fn name_lower_case() -> &'static str;
     fn name_camel_case() -> &'static str;
+    fn module_name() -> &'static str;
     #[allow(dead_code)]
     fn select(devices: &AudioDeviceRoot) -> &AudioDeviceGroup;
     fn select_mut(devices: &mut AudioDeviceRoot) -> &mut AudioDeviceGroup;
@@ -98,6 +102,10 @@ impl DeviceType for Sink {
 
     fn name_camel_case() -> &'static str {
         "Sink"
+    }
+
+    fn module_name() -> &'static str {
+        "module-remap-sink"
     }
 
     fn select(devices: &AudioDeviceRoot) -> &AudioDeviceGroup {
@@ -126,6 +134,7 @@ impl DeviceType for Sink {
             name: info.name.as_deref(),
             description: info.description.as_deref(),
             proplist: &info.proplist,
+            owner_module: info.owner_module,
         }
     }
 }
@@ -141,6 +150,10 @@ impl DeviceType for Source {
 
     fn name_camel_case() -> &'static str {
         "Source"
+    }
+
+    fn module_name() -> &'static str {
+        "module-remap-source"
     }
 
     fn select(devices: &AudioDeviceRoot) -> &AudioDeviceGroup {
@@ -169,27 +182,43 @@ impl DeviceType for Source {
             name: info.name.as_deref(),
             description: info.description.as_deref(),
             proplist: &info.proplist,
+            owner_module: info.owner_module,
         }
     }
 }
 
-fn check_device_match(
-    device_config: &DeviceConfig,
-    proplist: &libpulse_binding::proplist::Proplist,
-) -> bool {
-    if let Some(detect) = &device_config.detect {
-        for (key, expected_value) in detect {
-            if let Some(actual_value) = proplist.get_str(key) {
-                if &actual_value != expected_value {
+struct DeviceMatchContext<'a> {
+    device_config: &'a DeviceConfig,
+    proplist: &'a libpulse_binding::proplist::Proplist,
+    owner_module: Option<u32>,
+    remap_module_indices: &'a HashMap<String, u32>,
+    config_name: &'a str,
+}
+
+fn check_device_match(context: &DeviceMatchContext<'_>) -> bool {
+    match &context.device_config.match_config {
+        DeviceMatchConfig::Detect(detect) => {
+            for (key, expected_value) in detect {
+                if let Some(actual_value) = context.proplist.get_str(key) {
+                    if &actual_value != expected_value {
+                        return false;
+                    }
+                } else {
                     return false;
                 }
-            } else {
-                return false;
+            }
+            true
+        }
+        DeviceMatchConfig::Remap(_) => {
+            // Check if this device is created by our remap module
+            match (
+                context.owner_module,
+                context.remap_module_indices.get(context.config_name),
+            ) {
+                (Some(owner), Some(&module)) => owner == module,
+                _ => false,
             }
         }
-        true
-    } else {
-        false
     }
 }
 
@@ -197,6 +226,8 @@ pub struct State {
     context: Context,
     config: Config,
     all_devices: AudioDeviceRoot,
+    shutting_down: bool,
+    num_pending_unloads: u32,
 }
 
 impl State {
@@ -205,6 +236,8 @@ impl State {
             context,
             config,
             all_devices: AudioDeviceRoot::new(),
+            shutting_down: false,
+            num_pending_unloads: 0,
         }
     }
 
@@ -213,8 +246,13 @@ impl State {
         T: DeviceType,
     {
         let device_info = T::extract_info(info);
-        let devices = &mut T::select_mut(&mut self.all_devices).found_devices;
         let configs = T::get_definitions(&self.config);
+
+        let AudioDeviceGroup {
+            found_devices: devices,
+            remap_module_indices,
+            ..
+        } = T::select_mut(&mut self.all_devices);
 
         let mut device = AudioDevice {
             original_name: device_info
@@ -233,9 +271,17 @@ impl State {
         );
 
         for (name, device_config) in configs {
-            if check_device_match(device_config, device_info.proplist) {
+            let match_context = DeviceMatchContext {
+                device_config,
+                proplist: device_info.proplist,
+                owner_module: device_info.owner_module,
+                remap_module_indices,
+                config_name: name,
+            };
+
+            if check_device_match(&match_context) {
                 info!(
-                    "{} #{} is detected as '{}'",
+                    "{} #{} is recognized as '{}'",
                     T::name_camel_case(),
                     device_info.index,
                     name
@@ -329,6 +375,12 @@ pub struct StateRunner<'scope> {
     state: &'scope mut State,
 }
 
+struct RemapModuleParams<'a> {
+    config_name: &'a str,
+    remap_config: &'a crate::config::RemapConfig,
+    master_index: u32,
+}
+
 impl<'scope> StateRunner<'scope> {
     fn update_default_device<T: DeviceType>(&mut self) {
         let State {
@@ -406,6 +458,7 @@ impl<'scope> StateRunner<'scope> {
                         if should_update {
                             StateRunner::with(&origin, |runner| {
                                 runner.update_default_device::<T>();
+                                runner.check_and_load_remaps::<T>();
                             });
                         }
                     }
@@ -450,6 +503,12 @@ impl<'scope> StateRunner<'scope> {
             .context
             .introspect()
             .get_source_info_by_index(index, callback);
+    }
+
+    fn handle_device_removed<T: DeviceType>(&mut self, index: u32) {
+        self.state.remove_device::<T>(index);
+        self.update_default_device::<T>();
+        self.check_and_unload_remaps::<T>();
     }
 
     fn subscribe_to_events(
@@ -537,8 +596,7 @@ impl<'scope> StateRunner<'scope> {
                         }
                         Some(libpulse_binding::context::subscribe::Operation::Removed) => {
                             debug!("Got notified by removed sink #{index}");
-                            runner.state.remove_device::<Sink>(index);
-                            runner.update_default_device::<Sink>();
+                            runner.handle_device_removed::<Sink>(index);
                         }
                         Some(libpulse_binding::context::subscribe::Operation::Changed) => {
                             debug!("Got notified by changed sink #{index}");
@@ -553,8 +611,7 @@ impl<'scope> StateRunner<'scope> {
                         }
                         Some(libpulse_binding::context::subscribe::Operation::Removed) => {
                             debug!("Got notified by removed source #{index}");
-                            runner.state.remove_device::<Source>(index);
-                            runner.update_default_device::<Source>();
+                            runner.handle_device_removed::<Source>(index);
                         }
                         Some(libpulse_binding::context::subscribe::Operation::Changed) => {
                             debug!("Got notified by changed source #{index}");
@@ -570,6 +627,268 @@ impl<'scope> StateRunner<'scope> {
         Ok(())
     }
 
+    fn has_device_with_config_name(
+        devices: &AudioDeviceGroup,
+        config_name: &str,
+    ) -> bool {
+        // TODO: O(N) search could be problematic in environments with many devices.
+        // Consider adding reverse index: HashMap<String, Vec<u32>> for config_name -> device_indices
+        devices.found_devices.iter().any(|(_, device)| {
+            device.recognized_as.iter().any(|name| name == config_name)
+        })
+    }
+
+    fn find_device_index_by_config_name(
+        devices: &AudioDeviceGroup,
+        config_name: &str,
+    ) -> Option<u32> {
+        // TODO: O(N) search could be problematic in environments with many devices.
+        // Consider adding reverse index: HashMap<String, Vec<u32>> for config_name -> device_indices
+        devices
+            .found_devices
+            .iter()
+            .find(|(_, device)| {
+                device.recognized_as.iter().any(|name| name == config_name)
+            })
+            .map(|(&index, _)| index)
+    }
+
+    fn build_remap_module_args<T: DeviceType>(
+        remap_config: &crate::config::RemapConfig,
+        master_index: u32,
+    ) -> String {
+        let mut args = Vec::new();
+        args.push(format!("master={master_index}"));
+
+        if let Some(device_name) = &remap_config.device_name {
+            args.push(format!(
+                "{}_name={}",
+                T::name_lower_case(),
+                device_name
+            ));
+        }
+
+        if let Some(device_properties) = &remap_config.device_properties {
+            // Convert HashMap to PulseAudio property string format
+            let props = device_properties
+                .iter()
+                .map(|(k, v)| {
+                    // Escape single quotes in values
+                    let escaped_value = v.replace("'", "'\\''\\'");
+                    format!("{k}='{escaped_value}'")
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            args.push(format!(
+                "{}_properties=\"{}\"",
+                T::name_lower_case(),
+                props
+            ));
+        }
+
+        if let Some(format) = &remap_config.format {
+            args.push(format!("format={format}"));
+        }
+
+        if let Some(rate) = remap_config.rate {
+            args.push(format!("rate={rate}"));
+        }
+
+        if let Some(channels) = remap_config.channels {
+            args.push(format!("channels={channels}"));
+        }
+
+        if let Some(channel_map) = &remap_config.channel_map {
+            args.push(format!("channel_map={channel_map}"));
+        }
+
+        if let Some(master_channel_map) = &remap_config.master_channel_map {
+            args.push(format!("master_channel_map={master_channel_map}"));
+        }
+
+        if let Some(resample_method) = &remap_config.resample_method {
+            args.push(format!("resample_method={resample_method}"));
+        }
+
+        if let Some(remix) = remap_config.remix {
+            args.push(format!("remix={}", if remix { "yes" } else { "no" }));
+        }
+
+        args.join(" ")
+    }
+
+    fn load_remap_module<T: DeviceType>(
+        &mut self,
+        params: RemapModuleParams<'_>,
+    ) {
+        let argument = Self::build_remap_module_args::<T>(
+            params.remap_config,
+            params.master_index,
+        );
+        let weak_origin = Rc::downgrade(&self.origin);
+        let config_name_owned = params.config_name.to_string();
+
+        info!(
+            "Loading {} remap module for '{}' with master #{}",
+            T::name_lower_case(),
+            params.config_name,
+            params.master_index
+        );
+
+        let _op = self.state.context.introspect().load_module(
+            T::module_name(),
+            &argument,
+            move |module_index| {
+                if let Some(origin) = weak_origin.upgrade() {
+                    StateRunner::with(&origin, |runner| {
+                        let devices =
+                            T::select_mut(&mut runner.state.all_devices);
+                        devices
+                            .remap_module_indices
+                            .insert(config_name_owned.clone(), module_index);
+                        info!(
+                            "Successfully loaded {} remap module #{} for '{}'",
+                            T::name_lower_case(),
+                            module_index,
+                            config_name_owned
+                        );
+                    });
+                }
+            },
+        );
+    }
+
+    fn unload_remap_module<T: DeviceType>(&mut self, config_name: &str) {
+        let module_index = {
+            let devices = T::select(&self.state.all_devices);
+            devices.remap_module_indices.get(config_name).copied()
+        };
+
+        if let Some(index) = module_index {
+            let weak_origin = Rc::downgrade(&self.origin);
+            let config_name_owned = config_name.to_string();
+
+            info!(
+                "Unloading {} remap module #{} for '{}'",
+                T::name_lower_case(),
+                index,
+                config_name
+            );
+
+            let _op = self.state.context.introspect().unload_module(
+                index,
+                move |success| {
+                    if let Some(origin) = weak_origin.upgrade() {
+                        StateRunner::with(&origin, |runner| {
+                            if success {
+                                let devices = T::select_mut(&mut runner.state.all_devices);
+                                devices.remap_module_indices.remove(&config_name_owned);
+                                info!(
+                                    "Successfully unloaded {} remap module #{} for '{}'",
+                                    T::name_lower_case(),
+                                    index,
+                                    config_name_owned
+                                );
+                            } else {
+                                error!(
+                                    "Failed to unload {} remap module #{} for '{}'",
+                                    T::name_lower_case(),
+                                    index,
+                                    config_name_owned
+                                );
+                            }
+                        });
+                    }
+                },
+            );
+        }
+    }
+
+    fn check_and_load_remaps<T: DeviceType>(&mut self) {
+        // Skip remap loading if shutting down
+        if self.state.shutting_down {
+            debug!("Skipping remap loading during shutdown");
+            return;
+        }
+
+        let configs = T::get_definitions(&self.state.config);
+        let devices = T::select(&self.state.all_devices);
+
+        // Find all remap configs that should be loaded
+        let mut remaps_to_load = Vec::new();
+
+        for (config_name, config) in configs {
+            if let crate::config::DeviceMatchConfig::Remap(remap) =
+                &config.match_config
+            {
+                // Check if the master device exists
+                let master_exists =
+                    Self::has_device_with_config_name(devices, &remap.master);
+
+                if master_exists
+                    && !devices.remap_module_indices.contains_key(config_name)
+                {
+                    // Find the master device index
+                    if let Some(master_index) =
+                        Self::find_device_index_by_config_name(
+                            devices,
+                            &remap.master,
+                        )
+                    {
+                        remaps_to_load.push((
+                            config_name.clone(),
+                            remap.clone(),
+                            master_index,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Load all pending remaps
+        for (config_name, remap, master_index) in remaps_to_load {
+            self.load_remap_module::<T>(RemapModuleParams {
+                config_name: &config_name,
+                remap_config: &remap,
+                master_index,
+            });
+        }
+    }
+
+    fn check_and_unload_remaps<T: DeviceType>(&mut self) {
+        let configs = T::get_definitions(&self.state.config);
+        let devices = T::select(&self.state.all_devices);
+
+        // Find all remap modules that should be unloaded
+        let mut remaps_to_unload = Vec::new();
+
+        for config_name in devices.remap_module_indices.keys() {
+            let should_unload = if let Some(config) = configs.get(config_name)
+            {
+                if let crate::config::DeviceMatchConfig::Remap(remap) =
+                    &config.match_config
+                {
+                    // Check if the master device still exists
+                    !Self::has_device_with_config_name(devices, &remap.master)
+                } else {
+                    true // Config changed from remap to detect
+                }
+            } else {
+                true // Config removed
+            };
+
+            if should_unload {
+                remaps_to_unload.push(config_name.clone());
+            }
+        }
+
+        // Unload all pending remaps
+        for config_name in remaps_to_unload {
+            self.unload_remap_module::<T>(&config_name);
+        }
+    }
+
     pub fn with<Fn, Ret>(scope: &Rc<RefCell<State>>, proc: Fn) -> Ret
     where
         Fn: FnOnce(&mut StateRunner<'_>) -> Ret,
@@ -582,18 +901,113 @@ impl<'scope> StateRunner<'scope> {
     }
 }
 
+impl State {
+    pub fn begin_shutdown(&mut self) {
+        self.shutting_down = true;
+    }
+
+    pub fn has_pending_unloads(&self) -> bool {
+        self.num_pending_unloads > 0
+    }
+}
+
+impl StateRunner<'_> {
+    fn cleanup_device_type_modules<T: DeviceType>(&mut self) -> usize {
+        let modules: Vec<_> = T::select(&self.state.all_devices)
+            .remap_module_indices
+            .clone()
+            .into_iter()
+            .collect();
+
+        let mut count = 0;
+        for (config_name, module_index) in modules {
+            info!(
+                "Unloading {} remap module #{} for '{}'",
+                T::name_lower_case(),
+                module_index,
+                config_name
+            );
+            count += 1;
+            self.state.num_pending_unloads += 1;
+
+            let weak_origin = Rc::downgrade(&self.origin);
+            let config_name_owned = config_name.clone();
+            let device_type_name = T::name_lower_case();
+            let _op = self.state.context.introspect().unload_module(module_index, move |success| {
+                if let Some(origin) = weak_origin.upgrade() {
+                    StateRunner::with(&origin, |runner| {
+                        if success {
+                            debug!("Successfully unloaded {device_type_name} remap module for '{config_name_owned}'");
+                        } else {
+                            error!("Failed to unload {device_type_name} remap module for '{config_name_owned}'");
+                        }
+                        runner.state.num_pending_unloads -= 1;
+
+                        // Log when all modules are unloaded
+                        if runner.state.num_pending_unloads == 0 && runner.state.shutting_down {
+                            debug!("All remap modules unloaded");
+                        }
+                    });
+                }
+            });
+        }
+        count
+    }
+
+    pub fn cleanup_remap_modules(&mut self) {
+        info!("Cleaning up remap modules on shutdown");
+
+        let sink_count = self.cleanup_device_type_modules::<Sink>();
+        let source_count = self.cleanup_device_type_modules::<Source>();
+        let module_count = sink_count + source_count;
+
+        if module_count == 0 {
+            info!("No remap modules to clean up");
+        } else {
+            info!("Waiting for {module_count} remap modules to unload");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RemapConfig;
     use std::collections::HashMap;
+
+    fn create_test_proplist(
+        properties: &[(&str, &str)],
+    ) -> libpulse_binding::proplist::Proplist {
+        let mut proplist =
+            libpulse_binding::proplist::Proplist::new().unwrap();
+        for (key, value) in properties {
+            proplist.set_str(key, value).unwrap();
+        }
+        proplist
+    }
+
+    fn create_test_match_context<'a>(
+        config: &'a DeviceConfig,
+        proplist: &'a libpulse_binding::proplist::Proplist,
+        owner_module: Option<u32>,
+        remap_module_indices: &'a HashMap<String, u32>,
+        config_name: &'a str,
+    ) -> DeviceMatchContext<'a> {
+        DeviceMatchContext {
+            device_config: config,
+            proplist,
+            owner_module,
+            remap_module_indices,
+            config_name,
+        }
+    }
 
     #[test]
     fn test_check_device_match_with_matching_properties() {
-        // Create a mock Proplist
-        let mut proplist =
-            libpulse_binding::proplist::Proplist::new().unwrap();
-        proplist.set_str("device.api", "alsa").unwrap();
-        proplist.set_str("device.bus", "usb").unwrap();
+        let proplist = create_test_proplist(&[
+            ("device.api", "alsa"),
+            ("device.bus", "usb"),
+        ]);
 
         // Create matching config
         let mut detect = HashMap::new();
@@ -602,18 +1016,22 @@ mod tests {
 
         let config = DeviceConfig {
             priority: Some(1),
-            detect: Some(detect),
+            match_config: DeviceMatchConfig::Detect(detect),
         };
 
-        assert!(check_device_match(&config, &proplist));
+        let empty_map = HashMap::new();
+        let context = create_test_match_context(
+            &config, &proplist, None, &empty_map, "test",
+        );
+        assert!(check_device_match(&context));
     }
 
     #[test]
     fn test_check_device_match_with_non_matching_properties() {
-        let mut proplist =
-            libpulse_binding::proplist::Proplist::new().unwrap();
-        proplist.set_str("device.api", "alsa").unwrap();
-        proplist.set_str("device.bus", "pci").unwrap();
+        let proplist = create_test_proplist(&[
+            ("device.api", "alsa"),
+            ("device.bus", "pci"),
+        ]);
 
         let mut detect = HashMap::new();
         detect.insert("device.api".to_string(), "alsa".to_string());
@@ -621,18 +1039,22 @@ mod tests {
 
         let config = DeviceConfig {
             priority: Some(1),
-            detect: Some(detect),
+            match_config: DeviceMatchConfig::Detect(detect),
         };
 
-        assert!(!check_device_match(&config, &proplist));
+        let empty_map = HashMap::new();
+        let context = create_test_match_context(
+            &config, &proplist, None, &empty_map, "test",
+        );
+        assert!(!check_device_match(&context));
     }
 
     #[test]
     fn test_check_device_match_with_missing_property() {
-        let mut proplist =
-            libpulse_binding::proplist::Proplist::new().unwrap();
-        proplist.set_str("device.api", "alsa").unwrap();
-        // device.bus is not set
+        let proplist = create_test_proplist(&[
+            ("device.api", "alsa"),
+            // device.bus is not set
+        ]);
 
         let mut detect = HashMap::new();
         detect.insert("device.api".to_string(), "alsa".to_string());
@@ -640,22 +1062,114 @@ mod tests {
 
         let config = DeviceConfig {
             priority: Some(1),
-            detect: Some(detect),
+            match_config: DeviceMatchConfig::Detect(detect),
         };
 
-        assert!(!check_device_match(&config, &proplist));
+        let empty_map = HashMap::new();
+        let context = create_test_match_context(
+            &config, &proplist, None, &empty_map, "test",
+        );
+        assert!(!check_device_match(&context));
     }
 
     #[test]
-    fn test_check_device_match_with_no_detect() {
-        let proplist = libpulse_binding::proplist::Proplist::new().unwrap();
+    fn test_check_device_match_with_empty_detect() {
+        let proplist = create_test_proplist(&[]);
 
         let config = DeviceConfig {
             priority: Some(1),
-            detect: None,
+            match_config: DeviceMatchConfig::Detect(HashMap::new()),
         };
 
-        assert!(!check_device_match(&config, &proplist));
+        // Empty detect matches everything
+        let empty_map = HashMap::new();
+        let context = create_test_match_context(
+            &config, &proplist, None, &empty_map, "test",
+        );
+        assert!(check_device_match(&context));
+    }
+
+    #[test]
+    fn test_check_device_match_with_remap() {
+        let proplist = create_test_proplist(&[]);
+
+        let config = DeviceConfig {
+            priority: Some(1),
+            match_config: DeviceMatchConfig::Remap(
+                crate::config::RemapConfig {
+                    master: "test".to_string(),
+                    device_name: None,
+                    device_properties: None,
+                    format: None,
+                    rate: None,
+                    channels: None,
+                    channel_map: None,
+                    master_channel_map: None,
+                    resample_method: None,
+                    remix: None,
+                },
+            ),
+        };
+
+        // Remap configs never match during detection without owner_module
+        let empty_map = HashMap::new();
+        let context = create_test_match_context(
+            &config, &proplist, None, &empty_map, "test",
+        );
+        assert!(!check_device_match(&context));
+    }
+
+    #[test]
+    fn test_check_device_match_with_remap_and_owner_module() {
+        let config = DeviceConfig {
+            priority: Some(1),
+            match_config: DeviceMatchConfig::Remap(RemapConfig {
+                master: "master_device".to_string(),
+                device_name: Some("remap_device".to_string()),
+                device_properties: None,
+                format: None,
+                rate: None,
+                channels: None,
+                channel_map: None,
+                master_channel_map: None,
+                resample_method: None,
+                remix: None,
+            }),
+        };
+
+        let proplist = create_test_proplist(&[]);
+        let mut remap_module_indices = HashMap::new();
+        remap_module_indices.insert("remap_config".to_string(), 42);
+
+        // Test with matching owner module
+        let context = create_test_match_context(
+            &config,
+            &proplist,
+            Some(42),
+            &remap_module_indices,
+            "remap_config",
+        );
+        assert!(check_device_match(&context));
+
+        // Test with non-matching owner module
+        let context = create_test_match_context(
+            &config,
+            &proplist,
+            Some(43),
+            &remap_module_indices,
+            "remap_config",
+        );
+        assert!(!check_device_match(&context));
+
+        // Test with no owner module
+        let context = create_test_match_context(
+            &config,
+            &proplist,
+            None,
+            &remap_module_indices,
+            "remap_config",
+        );
+        assert!(!check_device_match(&context));
     }
 
     #[test]
@@ -684,21 +1198,21 @@ mod tests {
             "high_priority".to_string(),
             DeviceConfig {
                 priority: Some(1),
-                detect: None,
+                match_config: DeviceMatchConfig::Detect(HashMap::new()),
             },
         );
         configs.insert(
             "medium_priority".to_string(),
             DeviceConfig {
                 priority: Some(5),
-                detect: None,
+                match_config: DeviceMatchConfig::Detect(HashMap::new()),
             },
         );
         configs.insert(
             "low_priority".to_string(),
             DeviceConfig {
                 priority: Some(10),
-                detect: None,
+                match_config: DeviceMatchConfig::Detect(HashMap::new()),
             },
         );
 
@@ -725,8 +1239,8 @@ mod tests {
         configs.insert(
             "config1".to_string(),
             DeviceConfig {
-                priority: None, // No priority set
-                detect: None,
+                priority: None,
+                match_config: DeviceMatchConfig::Detect(HashMap::new()),
             },
         );
 
