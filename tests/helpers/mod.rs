@@ -371,6 +371,27 @@ impl OutputCapturer {
             }
         }
     }
+
+    /// Get a snapshot of the current output
+    pub fn get_output(&self) -> String {
+        self.output
+            .lock()
+            .map(|out| out.clone())
+            .unwrap_or_default()
+    }
+
+    /// Extract captured groups from a regex pattern
+    pub fn extract_regex(&self, pattern: &str) -> Option<Vec<String>> {
+        let re = Regex::new(pattern).ok()?;
+        let output = self.get_output();
+
+        re.captures(&output).map(|caps| {
+            caps.iter()
+                .skip(1) // Skip the full match
+                .filter_map(|m| m.map(|m| m.as_str().to_string()))
+                .collect()
+        })
+    }
 }
 
 impl Drop for OutputCapturer {

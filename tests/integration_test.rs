@@ -31,6 +31,16 @@ struct IsolatedPulseServer {
 
 impl IsolatedPulseServer {
     fn start() -> Result<Self, Box<dyn std::error::Error>> {
+        let default_config = r#"
+load-module module-null-sink sink_name=test_sink_1 sink_properties=device.description=TestSink1
+load-module module-null-sink sink_name=test_sink_2 sink_properties=device.description=TestSink2
+"#;
+        Self::start_with_config(default_config)
+    }
+
+    fn start_with_config(
+        module_config: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let temp_dir = TempDir::new()?;
         let runtime_dir = temp_dir.path().join("runtime");
         let state_dir = temp_dir.path().join("state");
@@ -42,16 +52,19 @@ impl IsolatedPulseServer {
         // PulseAudio requires .pa format, not .conf
         let config_path = temp_dir.path().join("pulse.pa");
         let socket_str = socket_path.display().to_string();
-        std::fs::write(&config_path,
-            format!("#!/usr/bin/pulseaudio -nF
+
+        // Build configuration with custom modules
+        let config = format!(
+            "#!/usr/bin/pulseaudio -nF
 # Minimal PulseAudio configuration for testing
 
 # Load only the necessary modules
 .fail
 load-module module-native-protocol-unix socket={socket_str} auth-anonymous=1
-load-module module-null-sink sink_name=test_sink_1 sink_properties=device.description=TestSink1
-load-module module-null-sink sink_name=test_sink_2 sink_properties=device.description=TestSink2
-"))?;
+{module_config}"
+        );
+
+        std::fs::write(&config_path, config)?;
 
         eprintln!("TEST: Starting PulseAudio with socket at: {socket_str}");
         eprintln!("TEST: Config file: {}", config_path.display());
@@ -248,10 +261,10 @@ sources:
     autopulsed.expect_string("Found source");
 
     // Device numbers vary between test runs
-    autopulsed.expect_regex(r"Sink #\d+ is detected as 'test_device_1'");
-    autopulsed.expect_regex(r"Sink #\d+ is detected as 'test_device_2'");
-    autopulsed.expect_regex(r"Source #\d+ is detected as 'test_monitor_1'");
-    autopulsed.expect_regex(r"Source #\d+ is detected as 'test_monitor_2'");
+    autopulsed.expect_regex(r"Sink #\d+ is recognized as 'test_device_1'");
+    autopulsed.expect_regex(r"Sink #\d+ is recognized as 'test_device_2'");
+    autopulsed.expect_regex(r"Source #\d+ is recognized as 'test_monitor_1'");
+    autopulsed.expect_regex(r"Source #\d+ is recognized as 'test_monitor_2'");
 
     autopulsed
         .expect_string("Successfully set default sink")
@@ -369,8 +382,8 @@ sources:
     autopulsed.expect_string("Connected to PulseAudio server");
 
     // Verify master devices are detected
-    autopulsed.expect_regex(r"Sink #\d+ is detected as 'master_sink'");
-    autopulsed.expect_regex(r"Source #\d+ is detected as 'master_source'");
+    autopulsed.expect_regex(r"Sink #\d+ is recognized as 'master_sink'");
+    autopulsed.expect_regex(r"Source #\d+ is recognized as 'master_source'");
 
     // Verify remap modules are loaded
     autopulsed.expect_string("Loading sink remap module for 'remapped_sink'");
@@ -403,6 +416,114 @@ sources:
     eprintln!("TEST: Killing autopulsed process");
     autopulsed.kill().ok();
     eprintln!("TEST: Remap test completed successfully");
+}
+
+#[test]
+fn test_remap_module_parameters() {
+    use helpers::OutputCapturer;
+    use std::process::Command;
+
+    let server = IsolatedPulseServer::start()
+        .expect("Failed to start isolated PulseAudio server");
+
+    // Config with remap entries
+    let config_content = r#"
+sinks:
+  master_sink:
+    priority: 1
+    detect:
+      device.description: "TestSink1"
+  remapped_sink:
+    priority: 2
+    remap:
+      master: "master_sink"
+      device_name: "remapped_test_sink"
+      device_properties:
+        device.description: "Remapped Test Sink"
+"#;
+
+    let config_path =
+        server.temp_dir.path().join("test_remap_params_config.yml");
+    std::fs::write(&config_path, config_content)
+        .expect("Failed to write test config");
+
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "run",
+        "--",
+        "--config",
+        config_path.to_str().unwrap(),
+        "--server",
+        &server.socket_path(),
+        "--verbose",
+    ])
+    .env("RUST_LOG", "debug");
+
+    eprintln!("TEST: Starting autopulsed for module parameter test");
+
+    let mut autopulsed =
+        OutputCapturer::spawn(cmd).expect("Failed to spawn autopulsed");
+
+    // Wait for remap module to be loaded
+    autopulsed.expect_string("Connected to PulseAudio server");
+    autopulsed.expect_regex(
+        r"Successfully loaded sink remap module #\d+ for 'remapped_sink'",
+    );
+
+    // Give autopulsed time to fully load the remap module
+    thread::sleep(Duration::from_millis(500));
+
+    // Now check the loaded modules using pactl
+    eprintln!("TEST: Checking loaded modules with pactl");
+    let output = Command::new("pactl")
+        .args(["--server", &server.socket_path(), "list", "modules"])
+        .output()
+        .expect("Failed to run pactl list modules");
+
+    let modules_output = String::from_utf8_lossy(&output.stdout);
+    eprintln!("TEST: Module list output:\n{}", modules_output);
+
+    // Find the remap module and verify it has master=test_sink_1 (not master=0)
+    let mut found_remap_module = false;
+    let mut correct_master_param = false;
+
+    let lines: Vec<&str> = modules_output.lines().collect();
+    for i in 0..lines.len() {
+        if lines[i].contains("module-remap-sink") {
+            found_remap_module = true;
+            eprintln!("TEST: Found remap module at line {}", i);
+
+            // Check the argument line (usually the next line after module name)
+            if i + 1 < lines.len() {
+                let arg_line = lines[i + 1];
+                eprintln!("TEST: Argument line: {}", arg_line);
+
+                // Verify master parameter uses device name, not index
+                if arg_line.contains("master=test_sink_1") {
+                    correct_master_param = true;
+                    eprintln!("TEST: Correct master parameter found!");
+                } else if arg_line.contains("master=0")
+                    || arg_line.contains("master=1")
+                {
+                    eprintln!(
+                        "TEST: ERROR - master parameter uses index instead of name!"
+                    );
+                }
+            }
+        }
+    }
+
+    assert!(found_remap_module, "Remap module not found in module list");
+    assert!(
+        correct_master_param,
+        "Master parameter should use device name (test_sink_1), not index"
+    );
+
+    eprintln!("TEST: Module parameter verification successful");
+
+    eprintln!("TEST: Killing autopulsed process");
+    autopulsed.kill().ok();
+    eprintln!("TEST: Module parameter test completed successfully");
 }
 
 #[test]
@@ -504,4 +625,125 @@ sinks:
     eprintln!("TEST: Killing autopulsed process");
     autopulsed.kill().ok();
     eprintln!("TEST: Non-existent master test completed successfully");
+}
+
+#[test]
+fn test_deferring_issue_reproduction() {
+    use helpers::OutputCapturer;
+
+    // Create server with master device only - remap will be created dynamically
+    let pulse_config = r#"
+load-module module-null-sink sink_name=master_sink sink_properties=device.description=MasterSink
+"#;
+
+    let server = IsolatedPulseServer::start_with_config(pulse_config)
+        .expect("Failed to start isolated PulseAudio server");
+
+    // Config with remap device having highest priority
+    // This mimics the user's scenario where remap device should become default
+    let config_content = r#"
+sinks:
+  master_device:
+    priority: 10
+    detect:
+      device.description: "MasterSink"
+  remapped_device:
+    priority: 1  # Highest priority - should become default when created
+    remap:
+      master: "master_device"
+      device_name: "high_priority_remap"
+      device_properties:
+        device.description: "High Priority Remap"
+"#;
+
+    let config_path = server.temp_dir.path().join("deferring_test_config.yml");
+    std::fs::write(&config_path, config_content)
+        .expect("Failed to write test config");
+
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "run",
+        "--",
+        "--config",
+        config_path.to_str().unwrap(),
+        "--server",
+        &server.socket_path(),
+        "--verbose",
+    ])
+    .env("RUST_LOG", "debug");
+
+    eprintln!("TEST: Running autopulsed to test deferring issue");
+
+    let mut autopulsed =
+        OutputCapturer::spawn(cmd).expect("Failed to spawn autopulsed");
+
+    // Wait for initial setup
+    autopulsed.expect_string("Connected to PulseAudio server");
+
+    // Wait for master device to be detected and set as default
+    autopulsed.expect_regex(r"Found sink #(\d+), name = master_sink");
+
+    // Extract the master device index
+    let master_index = autopulsed
+        .extract_regex(r"Sink #(\d+) is recognized as 'master_device'")
+        .and_then(|caps| caps.into_iter().next())
+        .and_then(|s| s.parse::<u32>().ok())
+        .expect("Failed to extract master device index");
+    eprintln!("TEST: Master device index: {}", master_index);
+
+    autopulsed.expect_string("Using sink 'master_device' as default");
+    autopulsed.expect_string(
+        format!("Successfully set default sink to #{}", master_index).as_str(),
+    );
+
+    // Now wait for remap module to be loaded
+    autopulsed
+        .expect_string("Loading sink remap module for 'remapped_device'");
+    autopulsed.expect_regex(
+        r"Successfully loaded sink remap module #\d+ for 'remapped_device'",
+    );
+
+    // Wait for the remap device to be detected
+    autopulsed.expect_regex(r"Found sink #(\d+), name = high_priority_remap");
+
+    // Extract the remap device index
+    let remap_index = autopulsed
+        .extract_regex(r"Sink #(\d+) is recognized as 'remapped_device'")
+        .and_then(|caps| caps.into_iter().next())
+        .and_then(|s| s.parse::<u32>().ok())
+        .expect("Failed to extract remap device index");
+    eprintln!("TEST: Remap device index: {}", remap_index);
+
+    // Now the critical part - the remap device has higher priority and should become default
+    // This is where the deferring bug manifests
+    eprintln!("TEST: Checking for deferring mechanism...");
+
+    // The system should try to switch to the higher priority remap device
+    autopulsed.expect_string("Using sink 'remapped_device' as default");
+
+    // The critical test: after trying to switch to remapped device,
+    // we should eventually see "Successfully set default sink to #<remap_index>"
+    //
+    // If the deferring bug exists, we'll see:
+    // - "Default sink is being changed... deferring setting"
+    // - But NO subsequent "Successfully set default sink to #<remap_index>"
+
+    eprintln!(
+        "TEST: Waiting for successful default sink switch to remap device..."
+    );
+
+    // This will panic (fail the test) if success message doesn't appear within 3 seconds
+    // which is exactly what we want when the deferring bug occurs
+    autopulsed.expect_string_timeout(
+        &format!("Successfully set default sink to #{}", remap_index),
+        Duration::from_secs(3),
+    );
+
+    // If we got here, the default was successfully set
+    eprintln!("TEST: PASS - Successfully set default sink to remap device");
+    eprintln!("TEST: The deferring mechanism (if triggered) worked correctly");
+
+    eprintln!("TEST: Killing autopulsed process");
+    autopulsed.kill().ok();
+    eprintln!("TEST: Deferring test completed");
 }

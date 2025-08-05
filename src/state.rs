@@ -355,6 +355,9 @@ impl State {
                         callback,
                     );
                 }
+            } else {
+                // No pending operation, clear the index
+                state.pending_default_index = None;
             }
         } else {
             error!("Failed to set default {}", T::name_lower_case());
@@ -412,7 +415,7 @@ impl<'scope> StateRunner<'scope> {
                 T::name_lower_case(),
                 config_name
             );
-            let pending = scope.pending_default_index.take().is_some();
+            let pending = scope.pending_default_index.is_some();
             scope.pending_default_index = Some(device_index);
             if pending {
                 debug!(
@@ -655,10 +658,10 @@ impl<'scope> StateRunner<'scope> {
 
     fn build_remap_module_args<T: DeviceType>(
         remap_config: &crate::config::RemapConfig,
-        master_index: u32,
+        master_name: &str,
     ) -> String {
         let mut args = Vec::new();
-        args.push(format!("master={master_index}"));
+        args.push(format!("master={master_name}"));
 
         if let Some(device_name) = &remap_config.device_name {
             args.push(format!(
@@ -722,9 +725,23 @@ impl<'scope> StateRunner<'scope> {
         &mut self,
         params: RemapModuleParams<'_>,
     ) {
+        // Get master device name from index
+        let devices = T::select(&self.state.all_devices);
+        let master_name = match devices.found_devices.get(&params.master_index)
+        {
+            Some(device) => &device.original_name,
+            None => {
+                error!(
+                    "Master device #{} not found for remap '{}'",
+                    params.master_index, params.config_name
+                );
+                return;
+            }
+        };
+
         let argument = Self::build_remap_module_args::<T>(
             params.remap_config,
-            params.master_index,
+            master_name,
         );
         let weak_origin = Rc::downgrade(&self.origin);
         let config_name_owned = params.config_name.to_string();
