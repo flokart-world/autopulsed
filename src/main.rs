@@ -56,15 +56,16 @@ struct Args {
 }
 
 struct App {
-    mainloop: Rc<RefCell<Mainloop>>,
-    // State must be kept alive for PulseAudio callbacks to work properly.
-    // Even though not directly accessed in run(), dropping it would cause
-    // callbacks to fail since they hold weak references to this state.
-    state: Rc<RefCell<State>>,
-    // Signal handlers for SIGINT (Ctrl+C) and SIGTERM
+    // IMPORTANT: Field order matters for destruction sequence!
+    // PulseAudio objects must be dropped in this order to prevent crashes:
+    // 1. SignalEvent handlers (before mainloop calls signals_done())
+    // 2. State (contains Context, must be dropped before Mainloop)
+    // 3. Mainloop (last)
+    // See https://github.com/jnqnfe/pulse-binding-rust/issues/65
     _sigint_handler: Option<SignalEvent>,
     _sigterm_handler: Option<SignalEvent>,
-    // Flag to indicate quit was requested
+    state: Rc<RefCell<State>>,
+    mainloop: Rc<RefCell<Mainloop>>,
     quit_requested: Rc<Cell<bool>>,
 }
 
@@ -108,10 +109,10 @@ impl App {
         StateRunner::with(&state, |runner| runner.connect(server.as_deref()))?;
 
         Ok(App {
-            mainloop,
-            state,
             _sigint_handler: None,
             _sigterm_handler: None,
+            state,
+            mainloop,
             quit_requested: Rc::new(Cell::new(false)),
         })
     }
@@ -199,13 +200,10 @@ impl App {
             }
         }
 
-        // Skip signal cleanup to avoid crashes
-        // The main() function will call std::process::exit(0) which will
-        // bypass all destructors, preventing the double-free issue in
-        // libpulse-binding's signal handling code.
-        debug!(
-            "Skipping signal cleanup - will exit via std::process::exit(0)"
-        );
+        // Signal cleanup is now handled properly through struct field ordering.
+        // SignalEvent fields are dropped before mainloop's destructor runs,
+        // preventing the double-free issue.
+        debug!("Cleanup completed successfully");
 
         Ok(())
     }
@@ -250,12 +248,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(config, args.server)?;
 
     app.run()?;
-
-    // WORKAROUND: Due to libpulse-binding's signal handling design flaw,
-    // we need to exit immediately to avoid double-free crashes during cleanup.
-    // The library has a fundamental issue where signals_done() and SignalEvent::drop()
-    // both call pa_signal_free(), causing assertion failures. This violates Rust's
-    // safety principles - safe code should never cause such crashes.
-    // Using std::process::exit(0) bypasses all destructors, preventing the issue.
-    std::process::exit(0);
+    Ok(())
 }
