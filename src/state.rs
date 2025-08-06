@@ -703,11 +703,14 @@ impl<'scope> StateRunner<'scope> {
         }
 
         if let Some(channel_map) = &remap_config.channel_map {
-            args.push(format!("channel_map={channel_map}"));
+            args.push(format!("channel_map={}", channel_map.join(",")));
         }
 
         if let Some(master_channel_map) = &remap_config.master_channel_map {
-            args.push(format!("master_channel_map={master_channel_map}"));
+            args.push(format!(
+                "master_channel_map={}",
+                master_channel_map.join(",")
+            ));
         }
 
         if let Some(resample_method) = &remap_config.resample_method {

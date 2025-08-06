@@ -99,8 +99,10 @@ sources:
       device_properties:
         device.description: "Scarlett 2i2 4th Gen (Mono Ch1)"
       channels: 1
-      channel_map: "mono"
-      master_channel_map: "front-left"
+      channel_map:
+        - "mono"
+      master_channel_map:
+        - "front-left"
 ```
 
 ### Configuration options
@@ -120,8 +122,8 @@ Creates virtual devices using PulseAudio's remap modules:
 - `format`: Audio format (e.g., "s16le", "float32le")
 - `rate`: Sample rate (e.g., 44100, 48000)
 - `channels`: Number of channels
-- `channel_map`: Channel mapping (e.g., "front-left,front-right")
-- `master_channel_map`: Master device channel mapping
+- `channel_map`: Channel mapping as array (e.g., ["front-left", "front-right"])
+- `master_channel_map`: Master device channel mapping as array
 - `resample_method`: Resampling method
 - `remix`: Enable remixing (true/false)
 

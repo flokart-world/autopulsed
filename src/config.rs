@@ -32,8 +32,8 @@ pub struct RemapConfig {
     pub channels: Option<u32>,
 
     // Channel mapping
-    pub channel_map: Option<String>,
-    pub master_channel_map: Option<String>,
+    pub channel_map: Option<Vec<String>>,
+    pub master_channel_map: Option<Vec<String>>,
 
     // Other options
     pub resample_method: Option<String>,

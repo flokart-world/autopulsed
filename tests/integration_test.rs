@@ -341,7 +341,7 @@ sinks:
       device_properties:
         device.description: "Remapped Test Sink"
       channels: 2
-      channel_map: "front-left,front-right"
+      channel_map: ["front-left", "front-right"]
 
 sources:
   master_source:
