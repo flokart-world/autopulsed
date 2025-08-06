@@ -78,17 +78,6 @@ sinks:
       device.bus: "usb"
       device.serial: "Focusrite_Scarlett_2i2_4th_Gen_XXXXXXXXXXXXXX"
 
-  # Remap device - created when 'scarlett' device is detected
-  scarlett_4ch_remap:
-    priority: 1
-    remap:
-      master: "scarlett"  # Reference to another device name
-      device_name: "scarlett_4ch"
-      device_properties:
-        device.description: "Scarlett 2i2 4th Gen (4ch)"
-      channels: 4
-      channel_map: "front-left,front-right,rear-left,rear-right"
-
 sources:
   iec958:
     priority: 2
@@ -96,10 +85,22 @@ sources:
       device.bus: "usb"
       device.bus_path: "pci-0000:14:00.0-usb-0:8:1.0"
   scarlett:
-    priority: 1
     detect:
       device.bus: "usb"
       device.serial: "Focusrite_Scarlett_2i2_4th_Gen_XXXXXXXXXXXXXX"
+      media.class: "Audio/Source"
+
+  # Remap device - creates mono source from Scarlett's first channel
+  scarlett_mono:
+    priority: 1
+    remap:
+      master: "scarlett"  # Reference to another device name
+      device_name: "scarlett_mono"
+      device_properties:
+        device.description: "Scarlett 2i2 4th Gen (Mono Ch1)"
+      channels: 1
+      channel_map: "mono"
+      master_channel_map: "front-left"
 ```
 
 ### Configuration options
